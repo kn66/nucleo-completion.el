@@ -8,6 +8,7 @@ module.
 - `nucleo-completion.el`: Emacs Lisp completion style, module loader, fallback filtering, regexp expander support, and highlighting.
 - `src/lib.rs`: Rust dynamic module exported to Emacs via the `emacs` crate.
 - `test/nucleo-completion-tests.el`: ERT tests.
+- `spec/nucleo-completion.org`: behavior specification and verification plan.
 - `.github/workflows/prebuilt-modules.yml`: cross-platform release artifact builds.
 - `README.org`: user-facing setup, build, and extension notes.
 
@@ -21,6 +22,20 @@ Run commands from the repository root.
 
 When changing only documentation, tests are optional. When changing Elisp or
 Rust behavior, run all three commands.
+
+## Development Process
+
+Use test-driven development for behavior changes. Start by adding or updating an
+ERT test that captures the expected behavior, verify that it fails for the right
+reason when practical, then implement the smallest focused change that makes the
+test pass. Keep regression tests close to the behavior they protect.
+
+Use specification-driven development for non-trivial changes. Before
+implementation, update `README.org` or add a dedicated spec document describing
+the expected user-visible behavior, configuration surface, edge cases, and
+verification steps. Keep specifications in sync with the implementation and
+tests. When a specification needs a diagram, write it with Mermaid notation so
+the diagram remains reviewable as plain text.
 
 ## Coding Style
 

@@ -77,6 +77,11 @@ distribution, consider adding a musl build and placing it under
 Emacs must be built with dynamic module support. You can check this with
 ~(functionp 'module-load)~.
 
+* Specification
+
+Behavior and verification details are maintained in
+~spec/nucleo-completion.org~.
+
 * Regexp Expanders
 
 ~nucleo-completion-regexp-functions~ can add language-specific matchers such as

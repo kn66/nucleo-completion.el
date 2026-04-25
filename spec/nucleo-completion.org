@@ -1,0 +1,178 @@
+#+title: nucleo-completion 仕様
+
+* 目的
+
+~nucleo-completion~ は Emacs の completion style として動作し、Rust dynamic
+module と ~nucleo-matcher~ による fuzzy matching / scoring を提供する。
+
+ビルド済み dynamic module が存在しない環境でも、Emacs Lisp の fallback による
+絞り込みは維持する。ただし fallback では Rust-backed scoring による並び替えは
+提供しない。
+
+* 公開インターフェース
+
+** Completion Style
+
+~completion-styles~ には ~nucleo~ を指定する。
+
+#+begin_src emacs-lisp
+  (require 'nucleo-completion)
+  (add-to-list 'completion-styles 'nucleo)
+#+end_src
+
+** Custom Variables
+
+- ~nucleo-completion-max-highlighted-completions~
+  - lazy highlight が使えない UI 向けに、先頭何件を eager highlight するかを指定する。
+- ~nucleo-completion-regexp-functions~
+  - 各検索 term を追加 regexp に展開する関数リスト。
+  - Migemo や pyim などの言語固有 matcher は本体へ直接組み込まず、ユーザー設定でこの hook に登録する。
+
+** Dynamic Module Functions
+
+Rust dynamic module がロードされた場合、次の関数が利用可能になる。
+
+- ~nucleo-completion-filter~
+  - pattern、candidate list、ignore-case を受け取り、match する候補を Nucleo score 順に返す。
+- ~nucleo-completion-score~
+  - pattern、candidate、ignore-case を受け取り、score または nil を返す。
+
+* Matching Semantics
+
+** Term Split
+
+入力 pattern は空白文字で分割する。空 term は無視する。
+
+例:
+
+#+begin_src text
+  "foo bar" -> ("foo" "bar")
+#+end_src
+
+** Term 間の関係
+
+term 同士は AND 条件である。すべての term が候補に一致する必要がある。
+
+** Term 内の関係
+
+各 term では、標準 fuzzy subsequence matcher と
+~nucleo-completion-regexp-functions~ が返す regexp matcher を OR 条件で扱う。
+
+例:
+
+#+begin_src text
+  term = "nihon"
+  fuzzy: n.*i.*h.*o.*n
+  regexp expander: 日本
+
+  candidate は fuzzy または 日本 regexp のどちらかに一致すればよい。
+#+end_src
+
+* Processing Flow
+
+#+begin_src mermaid
+  flowchart TD
+    A[completion input] --> B[completion boundaries]
+    B --> C[extract prefix and needle]
+    C --> D{needle empty?}
+    D -->|yes| E[return candidates without nucleo filtering]
+    D -->|no| F{Rust module loaded?}
+    F -->|yes| G{regexp expanders produced extra regexps?}
+    G -->|yes| H[Elisp regexp filter]
+    H --> I[Rust module sorts fuzzy-matchable candidates]
+    I --> J[append regexp-only matches preserving filtered order]
+    G -->|no| K[Rust module filters and sorts]
+    F -->|no| L[Elisp fallback filter]
+    K --> M[highlight top candidates]
+    J --> M
+    L --> M
+    E --> M
+    M --> N[completion result]
+#+end_src
+
+* Module Loading
+
+Dynamic module は次の順で探索する。
+
+1. ~locate-library~ で見つかる ~nucleo-completion-module~
+2. ~locate-library~ で見つかる platform library name
+3. ~bin/<target-triple>/~
+4. package directory root
+5. ~target/release/~
+6. ~target/debug/~
+
+Platform library name:
+
+- Linux: ~libnucleo_completion_module.so~
+- macOS: ~libnucleo_completion_module.dylib~
+- Windows: ~nucleo_completion_module.dll~
+
+Prebuilt module は ~bin/<target-triple>/~ に配置する。
+
+* Platform Triple Detection
+
+Linux:
+
+- x86_64: ~x86_64-unknown-linux-gnu~, ~x86_64-unknown-linux-musl~
+- aarch64/arm64: ~aarch64-unknown-linux-gnu~, ~aarch64-unknown-linux-musl~
+
+macOS:
+
+- x86_64: ~x86_64-apple-darwin~
+- aarch64/arm64: ~aarch64-apple-darwin~
+
+Windows:
+
+- mingw/gnu: ~x86_64-pc-windows-gnu~, ~x86_64-pc-windows-msvc~
+- default: ~x86_64-pc-windows-msvc~, ~x86_64-pc-windows-gnu~
+- arm64/aarch64: ~aarch64-pc-windows-msvc~
+
+* Highlight
+
+候補表示では、各 term の greedy subsequence match を
+~completions-common-part~ face で強調する。
+
+lazy highlight をサポートする UI では ~completion-lazy-hilit-fn~ を設定する。
+それ以外では ~nucleo-completion-max-highlighted-completions~ 件だけ eager highlight
+する。
+
+* Edge Cases
+
+- 空入力では独自 scoring/filtering を行わず、既存 completion metadata の sort 関数を尊重する。
+- 無効 regexp、nil、非文字列を返す regexp function は無視する。
+- regexp expander でしか一致しない候補は、Rust module sorting 後も落とさない。
+- Rust module がない場合も、Elisp fallback により絞り込みは行う。
+- case sensitivity は ~completion-ignore-case~ に従う。
+
+* Verification
+
+実装変更時は次を実行する。
+
+#+begin_src sh
+  cargo build --release
+  emacs -Q --batch -L . -L target/release --eval '(byte-compile-file "nucleo-completion.el")'
+  emacs -Q --batch -L . -L target/release -L test -l test/nucleo-completion-tests.el -f ert-run-tests-batch-and-exit
+#+end_src
+
+期待結果:
+
+#+begin_src text
+  15 tests, 15 results as expected
+#+end_src
+
+* Test Coverage
+
+ERT では次を検証する。
+
+- term 分割
+- fuzzy subsequence regexp の escaping
+- platform triple detection
+- prebuilt module 探索パス
+- Rust module 経由の filtering / scoring order
+- case-sensitive / case-insensitive matching
+- 空入力時の metadata sort preservation
+- スペース区切り複数 term matching
+- regexp expander の文字列、リスト、無効値処理
+- regexp-only match preservation
+- metadata adjustment
+- highlight
