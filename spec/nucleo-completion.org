@@ -136,6 +136,11 @@ workflow は手動実行のみとする。各 platform の artifact を統合し
 ~bin/<target-triple>/~ 配下に配置して ~main~ に commit/push する。
 差分がない場合は commit しない。
 
+macOS runner は以下を使う。
+
+- ~x86_64-apple-darwin~: ~macos-15-intel~
+- ~aarch64-apple-darwin~: ~macos-15~
+
 * Platform Triple Detection
 
 Linux:
