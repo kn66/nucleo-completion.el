@@ -16,8 +16,8 @@
 ;;
 ;;   cargo build --release
 ;;
-;; Then add this directory and target/release to `load-path', and prepend
-;; `nucleo' to `completion-styles'.
+;; Then add this directory to `load-path' and prepend `nucleo' to
+;; `completion-styles'.
 
 ;;; Code:
 

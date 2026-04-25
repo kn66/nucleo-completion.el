@@ -127,6 +127,21 @@
                      "jp lang" '("日本語" "日本史" "英語" "jp-lang")))
                    '("jp-lang" "日本語")))))
 
+(ert-deftest nucleo-completion-regexp-functions-buffer-local-disable-test ()
+  (let ((nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (when (string= term "nihon")
+                   "日本"))))
+        (candidates '("日本語" "nihon-go" "英語")))
+    (should (equal (nucleo-completion-tests--plain
+                    (nucleo-completion-all-completions "nihon" candidates))
+                   '("nihon-go" "日本語")))
+    (with-temp-buffer
+      (setq-local nucleo-completion-regexp-functions nil)
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions "nihon" candidates))
+                     '("nihon-go"))))))
+
 (ert-deftest nucleo-completion-sort-with-module-keeps-regexp-only-matches-test ()
   (cl-letf (((symbol-function 'nucleo-completion-filter)
              (lambda (_needle candidates _ignore-case)

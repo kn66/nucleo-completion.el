@@ -148,6 +148,15 @@ pyim example:
 Terms are ANDed together. For each term, the built-in fuzzy subsequence matcher
 and configured regexp expanders are ORed together.
 
+To keep ~nucleo~ scoring in Corfu but disable Migemo/pyim-style regexp expansion
+there, make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
+
+#+begin_src emacs-lisp
+  (add-hook 'corfu-mode-hook
+            (lambda ()
+              (setq-local nucleo-completion-regexp-functions nil)))
+#+end_src
+
 For other packages, write a small adapter:
 
 #+begin_src emacs-lisp
