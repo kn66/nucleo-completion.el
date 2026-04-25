@@ -3,6 +3,22 @@
 ~nucleo-completion~ is an Emacs completion style backed by a Rust dynamic
 module using the ~nucleo-matcher~ crate.
 
+* Screenshots
+:PROPERTIES:
+:ID:       d19e9b9a-6320-4076-a611-8e7dd6fd12bb
+:END:
+
+
+#+DOWNLOADED: screenshot @ 2026-04-25 22:12:41
+[[file:Screenshots/2026-04-25_22-12-41_screenshot.png]]
+
+#+DOWNLOADED: screenshot @ 2026-04-25 22:13:13
+[[file:Screenshots/2026-04-25_22-13-13_screenshot.png]]
+
+[[file:Screenshots/vertico.gif]]
+
+[[file:Screenshots/corfu.gif]]
+
 * Setup
 
 Install with ~package-vc~:

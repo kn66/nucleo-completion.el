@@ -223,7 +223,7 @@ least one regexp from every group."
                  while match
                  do (add-face-text-property match (1+ match)
                                             'completions-common-part nil haystack)
-                    (setq start (1+ match))))
+                 (setq start (1+ match))))
       (dolist (regexp (nucleo-completion--regexp-function-regexps term))
         (nucleo-completion--highlight-regexp regexp haystack))))
   haystack)
