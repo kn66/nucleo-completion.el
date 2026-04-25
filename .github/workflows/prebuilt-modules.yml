@@ -1,12 +1,10 @@
 name: prebuilt-modules
 
+permissions:
+  contents: write
+
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-  release:
-    types: [created]
 
 jobs:
   build:
@@ -43,21 +41,43 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p dist/nucleo-completion/bin/${{ matrix.target }}
+          mkdir -p dist/bin/${{ matrix.target }}
           cp target/${{ matrix.target }}/release/${{ matrix.library }} \
-            dist/nucleo-completion/bin/${{ matrix.target }}/
-          cp nucleo-completion.el README.org Cargo.toml Cargo.lock \
-            dist/nucleo-completion/
-          cp -R src test dist/nucleo-completion/
+            dist/bin/${{ matrix.target }}/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: nucleo-completion-${{ matrix.target }}
-          path: dist/nucleo-completion
+          path: dist
 
-      - name: Upload release asset
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+  commit-prebuilt-modules:
+    name: commit-prebuilt-modules
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prebuilt artifacts
+        uses: actions/download-artifact@v4
         with:
-          files: dist/nucleo-completion/bin/${{ matrix.target }}/${{ matrix.library }}
+          pattern: nucleo-completion-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Commit modules to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          cp -R artifacts/bin/. bin/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bin
+          if git diff --cached --quiet; then
+            echo "No prebuilt module changes."
+            exit 0
+          fi
+          git commit -m "Update prebuilt modules"
+          git push

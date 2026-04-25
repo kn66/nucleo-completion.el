@@ -5,7 +5,26 @@ module using the ~nucleo-matcher~ crate.
 
 * Setup
 
-Add the package directory to ~load-path~:
+Install with ~package-vc~:
+
+#+begin_src emacs-lisp
+  (package-vc-install
+   '(nucleo-completion
+     :url "https://github.com/kn66/nucleo-completion.el"))
+#+end_src
+
+Then enable the completion style:
+
+#+begin_src emacs-lisp
+  (require 'nucleo-completion)
+  (add-to-list 'completion-styles 'nucleo)
+#+end_src
+
+Prebuilt dynamic modules are committed under ~bin/<target-triple>/~ after the
+manual GitHub Actions workflow is run. This allows ~package-vc~ users to install
+the package without a Rust build environment.
+
+To use a local checkout, add the package directory to ~load-path~:
 
 #+begin_src emacs-lisp
   (add-to-list 'load-path "/path/to/nucleo-completion.el")
@@ -66,12 +85,9 @@ This repository includes a GitHub Actions workflow at
 - ~aarch64-apple-darwin~
 - ~x86_64-pc-windows-msvc~
 
-Run the workflow manually or create a GitHub Release. Copy the produced dynamic
-library into the matching ~bin/<target-triple>/~ directory before distributing a
-binary bundle.
-
-The workflow also runs on pushes to ~main~ and on pull requests, so prebuilt
-module builds are checked during normal development.
+Run the workflow manually from the GitHub Actions page. It builds the modules,
+collects them under ~bin/<target-triple>/~, and commits the updated ~bin/~
+directory back to ~main~ when there are changes.
 
 Linux binaries are sensitive to libc compatibility. For broad Linux
 distribution, consider adding a musl build and placing it under
