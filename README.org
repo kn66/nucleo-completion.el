@@ -70,6 +70,9 @@ Run the workflow manually or create a GitHub Release. Copy the produced dynamic
 library into the matching ~bin/<target-triple>/~ directory before distributing a
 binary bundle.
 
+The workflow also runs on pushes to ~main~ and on pull requests, so prebuilt
+module builds are checked during normal development.
+
 Linux binaries are sensitive to libc compatibility. For broad Linux
 distribution, consider adding a musl build and placing it under
 ~bin/x86_64-unknown-linux-musl/~.

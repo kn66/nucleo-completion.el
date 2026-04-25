@@ -1,6 +1,9 @@
 name: prebuilt-modules
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
   release:
     types: [created]
