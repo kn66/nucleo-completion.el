@@ -124,6 +124,33 @@ Migemo example:
                  #'my-nucleo-completion-migemo-regexp))
 #+end_src
 
+Complete ~use-package~ example with Migemo and Corfu:
+
+#+begin_src emacs-lisp
+  (use-package nucleo-completion
+    :vc (:url "https://github.com/kn66/nucleo-completion.el.git"
+         :rev :newest)
+    :config
+    (setopt completion-styles '(nucleo basic))
+
+    (with-eval-after-load 'migemo
+      (defun my-nucleo-completion-migemo-regexp (term)
+        (when (not (string-empty-p term))
+          (let ((regexp (downcase (migemo-get-pattern term))))
+            (condition-case nil
+                (progn
+                  (string-match-p regexp "")
+                  regexp)
+              (invalid-regexp nil)))))
+
+      (add-to-list 'nucleo-completion-regexp-functions
+                   #'my-nucleo-completion-migemo-regexp))
+
+    (add-hook 'corfu-mode-hook
+              (lambda ()
+                (setq-local nucleo-completion-regexp-functions nil))))
+#+end_src
+
 pyim example:
 
 #+begin_src emacs-lisp
