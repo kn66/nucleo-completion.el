@@ -175,4 +175,17 @@
            #("foo/bar" 0 3 (face completions-common-part)
              4 7 (face completions-common-part)))))
 
+(ert-deftest nucleo-completion-regexp-function-highlight-test ()
+  (let ((nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (pcase term
+                   ("nihon" "日本")
+                   ("go" "語"))))))
+    (should (equal-including-properties
+             (nucleo-completion-highlight "nihon" "日本語")
+             #("日本語" 0 2 (face completions-common-part))))
+    (should (equal-including-properties
+             (nucleo-completion-highlight "nihon go" "日本語")
+             #("日本語" 0 3 (face completions-common-part))))))
+
 ;;; nucleo-completion-tests.el ends here

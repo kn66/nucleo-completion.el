@@ -200,8 +200,20 @@ least one regexp from every group."
                     unless (gethash candidate seen)
                     collect candidate))))
 
+(defun nucleo-completion--highlight-regexp (regexp haystack)
+  "Highlight REGEXP matches in HAYSTACK."
+  (let ((start 0))
+    (while (and (<= start (length haystack))
+                (string-match regexp haystack start))
+      (let ((beg (match-beginning 0))
+            (end (match-end 0)))
+        (when (< beg end)
+          (add-face-text-property beg end
+                                  'completions-common-part nil haystack))
+        (setq start (if (< beg end) end (1+ start)))))))
+
 (defun nucleo-completion-highlight (needle haystack)
-  "Highlight destructively the greedy NEEDLE matches in HAYSTACK."
+  "Highlight destructively the NEEDLE matches in HAYSTACK."
   (let ((case-fold-search completion-ignore-case))
     (dolist (term (nucleo-completion--terms needle))
       (let ((start 0))
@@ -211,7 +223,9 @@ least one regexp from every group."
                  while match
                  do (add-face-text-property match (1+ match)
                                             'completions-common-part nil haystack)
-                    (setq start (1+ match))))))
+                    (setq start (1+ match))))
+      (dolist (regexp (nucleo-completion--regexp-function-regexps term))
+        (nucleo-completion--highlight-regexp regexp haystack))))
   haystack)
 
 ;;;###autoload
