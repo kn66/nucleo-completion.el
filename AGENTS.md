@@ -37,6 +37,10 @@ verification steps. Keep specifications in sync with the implementation and
 tests. When a specification needs a diagram, write it with Mermaid notation so
 the diagram remains reviewable as plain text.
 
+When modifying existing behavior, review `spec/nucleo-completion.org` and update
+it in the same change whenever the implementation, tests, supported edge cases,
+or verification expectations change.
+
 ## Coding Style
 
 Use standard Emacs Lisp style: lexical binding, two-space indentation, docstrings

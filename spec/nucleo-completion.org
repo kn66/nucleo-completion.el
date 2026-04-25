@@ -161,8 +161,10 @@ Windows:
 
 * Highlight
 
-候補表示では、各 term の greedy subsequence match を
-~completions-common-part~ face で強調する。
+候補表示では、各 term の greedy subsequence match と
+~nucleo-completion-regexp-functions~ が返す regexp match を
+~completions-common-part~ face で強調する。regexp が空文字列に一致する場合は、
+無限ループしないように次の位置へ進める。
 
 lazy highlight をサポートする UI では ~completion-lazy-hilit-fn~ を設定する。
 それ以外では ~nucleo-completion-max-highlighted-completions~ 件だけ eager highlight
@@ -190,7 +192,7 @@ lazy highlight をサポートする UI では ~completion-lazy-hilit-fn~ を設
 期待結果:
 
 #+begin_src text
-  16 tests, 16 results as expected
+  17 tests, 17 results as expected
 #+end_src
 
 * Test Coverage
@@ -210,3 +212,4 @@ ERT では次を検証する。
 - regexp-only match preservation
 - metadata adjustment
 - highlight
+- regexp expander match highlight
