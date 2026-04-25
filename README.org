@@ -123,6 +123,22 @@ This package was inspired in part by ~hotfuzz~. Its performance is excellent,
 and I am grateful to the author for creating and sharing such a fast Emacs
 fuzzy matching package.
 
+* Tie Sorting
+
+By default, ~nucleo-completion~ keeps Nucleo's score order unchanged.  You can
+optionally refine candidates with the same Nucleo score:
+
+#+begin_src emacs-lisp
+  ;; Put shorter candidates first when scores are equal.
+  (setq nucleo-completion-sort-ties-by-length t)
+
+  ;; Then sort alphabetically when scores are still equal.
+  (setq nucleo-completion-sort-ties-alphabetically t)
+#+end_src
+
+When both options are enabled, candidates are ordered by Nucleo score, then
+length, then alphabetical order.  Different Nucleo scores are not reordered.
+
 * History Sorting
 
 ~nucleo-completion~ can be combined with Emacs' standard completion metadata.

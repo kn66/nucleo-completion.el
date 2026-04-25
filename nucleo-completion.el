@@ -25,6 +25,8 @@
 (require 'subr-x)
 
 (declare-function nucleo-completion-filter "nucleo-completion-module")
+(declare-function nucleo-completion-score "nucleo-completion-module")
+(declare-function nucleo-completion-scored-filter "nucleo-completion-module")
 
 (defgroup nucleo-completion nil
   "Nucleo-backed fuzzy completion style."
@@ -44,6 +46,19 @@ The built-in fuzzy subsequence matcher is always used.  Regexps
 from this option are ORed with it for each term, while terms are
 ANDed together."
   :type '(repeat function))
+
+(defcustom nucleo-completion-sort-ties-by-length nil
+  "Whether to sort equal-scoring Nucleo matches by candidate length.
+When non-nil, shorter candidates come first.  This only affects
+candidates with the same Nucleo score."
+  :type 'boolean)
+
+(defcustom nucleo-completion-sort-ties-alphabetically nil
+  "Whether to sort equal-scoring Nucleo matches alphabetically.
+When `nucleo-completion-sort-ties-by-length' is also non-nil,
+alphabetical order is used after comparing length.  This only
+affects candidates with the same Nucleo score."
+  :type 'boolean)
 
 (defvar nucleo-completion--filtering-p nil)
 
@@ -191,7 +206,7 @@ least one regexp from every group."
 
 (defun nucleo-completion--sort-with-module (needle candidates ignore-case)
   "Sort CANDIDATES with the Rust module without dropping regexp-only matches."
-  (let* ((scored (nucleo-completion-filter needle candidates ignore-case))
+  (let* ((scored (nucleo-completion--module-filter needle candidates ignore-case))
          (seen (make-hash-table :test #'equal)))
     (dolist (candidate scored)
       (puthash candidate t seen))
@@ -199,6 +214,49 @@ least one regexp from every group."
            (cl-loop for candidate in candidates
                     unless (gethash candidate seen)
                     collect candidate))))
+
+(defun nucleo-completion--scored-filter (needle candidates ignore-case)
+  "Return matching CANDIDATES as (CANDIDATE . SCORE) pairs."
+  (if (fboundp 'nucleo-completion-scored-filter)
+      (nucleo-completion-scored-filter needle candidates ignore-case)
+    (cl-loop for candidate in candidates
+             for score = (nucleo-completion-score needle candidate ignore-case)
+             when score
+             collect (cons candidate score))))
+
+(defun nucleo-completion--string-lessp (a b ignore-case)
+  "Return non-nil when A should sort before B alphabetically."
+  (if ignore-case
+      (string-lessp (downcase a) (downcase b))
+    (string-lessp a b)))
+
+(defun nucleo-completion--scored-entry-lessp (ignore-case a b)
+  "Return non-nil when scored entry A should sort before B."
+  (let ((a-candidate (car a))
+        (a-score (cdr a))
+        (b-candidate (car b))
+        (b-score (cdr b)))
+    (cond
+     ((> a-score b-score) t)
+     ((< a-score b-score) nil)
+     ((and nucleo-completion-sort-ties-by-length
+           (/= (length a-candidate) (length b-candidate)))
+      (< (length a-candidate) (length b-candidate)))
+     (nucleo-completion-sort-ties-alphabetically
+      (nucleo-completion--string-lessp a-candidate b-candidate ignore-case))
+     (t nil))))
+
+(defun nucleo-completion--module-filter (needle candidates ignore-case)
+  "Filter and sort CANDIDATES with the Rust module."
+  (if (or nucleo-completion-sort-ties-by-length
+          nucleo-completion-sort-ties-alphabetically)
+      (mapcar #'car
+              (cl-stable-sort (nucleo-completion--scored-filter
+                               needle candidates ignore-case)
+                              (apply-partially
+                               #'nucleo-completion--scored-entry-lessp
+                               ignore-case)))
+    (nucleo-completion-filter needle candidates ignore-case)))
 
 (defun nucleo-completion--highlight-regexp (regexp haystack)
   "Highlight REGEXP matches in HAYSTACK."
@@ -257,7 +315,8 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                  (nucleo-completion--regexp-filter needle all)
                  completion-ignore-case)))
      (module-p
-      (setq all (nucleo-completion-filter needle all completion-ignore-case)))
+      (setq all (nucleo-completion--module-filter
+                 needle all completion-ignore-case)))
      (t
       (setq all (nucleo-completion--fallback-filter needle all))))
     (setq nucleo-completion--filtering-p (not (string= needle "")))

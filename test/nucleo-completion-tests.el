@@ -152,6 +152,36 @@
                     "nihon" '("日本語" "roman-nihon" "日本史") nil)
                    '("roman-nihon" "日本語" "日本史")))))
 
+(ert-deftest nucleo-completion-sort-ties-by-length-test ()
+  (let ((nucleo-completion-sort-ties-by-length t)
+        (nucleo-completion-sort-ties-alphabetically nil))
+    (cl-letf (((symbol-function 'nucleo-completion-scored-filter)
+               (lambda (_needle _candidates _ignore-case)
+                 '(("alphabet" . 10) ("alpha" . 10) ("alpaca" . 11)))))
+      (should (equal (nucleo-completion--module-filter
+                      "alp" '("alphabet" "alpha" "alpaca") nil)
+                     '("alpaca" "alpha" "alphabet"))))))
+
+(ert-deftest nucleo-completion-sort-ties-alphabetically-test ()
+  (let ((nucleo-completion-sort-ties-by-length nil)
+        (nucleo-completion-sort-ties-alphabetically t))
+    (cl-letf (((symbol-function 'nucleo-completion-scored-filter)
+               (lambda (_needle _candidates _ignore-case)
+                 '(("beta" . 10) ("alpha" . 10) ("aardvark" . 9)))))
+      (should (equal (nucleo-completion--module-filter
+                      "a" '("beta" "alpha" "aardvark") nil)
+                     '("alpha" "beta" "aardvark"))))))
+
+(ert-deftest nucleo-completion-sort-ties-length-before-alphabetical-test ()
+  (let ((nucleo-completion-sort-ties-by-length t)
+        (nucleo-completion-sort-ties-alphabetically t))
+    (cl-letf (((symbol-function 'nucleo-completion-scored-filter)
+               (lambda (_needle _candidates _ignore-case)
+                 '(("bbb" . 10) ("aa" . 10) ("ccc" . 10) ("aaa" . 10)))))
+      (should (equal (nucleo-completion--module-filter
+                      "a" '("bbb" "aa" "ccc" "aaa") nil)
+                     '("aa" "aaa" "bbb" "ccc"))))))
+
 (ert-deftest nucleo-completion-adjust-metadata-test ()
   (let ((nucleo-completion--filtering-p t))
     (should (eq (completion-metadata-get
