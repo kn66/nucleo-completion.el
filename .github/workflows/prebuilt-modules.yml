@@ -1,0 +1,60 @@
+name: prebuilt-modules
+
+on:
+  workflow_dispatch:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            library: libnucleo_completion_module.so
+          - os: macos-13
+            target: x86_64-apple-darwin
+            library: libnucleo_completion_module.dylib
+          - os: macos-14
+            target: aarch64-apple-darwin
+            library: libnucleo_completion_module.dylib
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            library: nucleo_completion_module.dll
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build module
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage module
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/nucleo-completion/bin/${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/${{ matrix.library }} \
+            dist/nucleo-completion/bin/${{ matrix.target }}/
+          cp nucleo-completion.el README.org Cargo.toml Cargo.lock \
+            dist/nucleo-completion/
+          cp -R src test dist/nucleo-completion/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nucleo-completion-${{ matrix.target }}
+          path: dist/nucleo-completion
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/nucleo-completion/bin/${{ matrix.target }}/${{ matrix.library }}
