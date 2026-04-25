@@ -223,6 +223,53 @@
            #("foo-baz" 0 1 (face completions-common-part)
              4 5 (face completions-common-part)))))
 
+(ert-deftest nucleo-completion-score-band-highlight-disabled-test ()
+  (let ((nucleo-completion-highlight-score-bands nil))
+    (let ((faces (ensure-list
+                  (get-text-property
+                   0 'face
+                   (nucleo-completion--highlight-candidate
+                    "foo" (copy-sequence "foo-bar") 100 100)))))
+      (should-not (memq 'nucleo-completion-high-score-face faces))
+      (should-not (memq 'nucleo-completion-low-score-face faces)))))
+
+(ert-deftest nucleo-completion-score-band-highlight-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-highlight-score-bands t)
+        (nucleo-completion-high-score-ratio 0.85))
+    (should (memq 'nucleo-completion-high-score-face
+                  (ensure-list
+                   (get-text-property
+                    0 'face
+                    (nucleo-completion--highlight-candidate
+                     "foo" (copy-sequence "foo-bar") 10 100)))))
+    (should (memq 'nucleo-completion-low-score-face
+                  (ensure-list
+                   (get-text-property
+                    0 'face
+                    (nucleo-completion--highlight-candidate
+                     "fb" (copy-sequence "foo-bar") 10 100)))))))
+
+(ert-deftest nucleo-completion-all-completions-score-band-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-highlight-score-bands t)
+        (nucleo-completion-high-score-ratio 0.85)
+        (nucleo-completion-max-highlighted-completions 10))
+    (cl-letf (((symbol-function 'nucleo-completion-filter)
+               (lambda (_needle _candidates _ignore-case)
+                 '("foo" "fob")))
+              ((symbol-function 'nucleo-completion-scored-filter)
+               (lambda (_needle _candidates _ignore-case)
+                 '(("foo" . 100) ("fob" . 50)))))
+      (let ((all (nucleo-completion-all-completions
+                  "fo" '("foo" "fob" "bar"))))
+        (should (equal (nucleo-completion-tests--plain all)
+                       '("foo" "fob")))
+        (should (memq 'nucleo-completion-high-score-face
+                      (ensure-list (get-text-property 0 'face (car all)))))
+        (should (memq 'nucleo-completion-low-score-face
+                      (ensure-list (get-text-property 0 'face (cadr all)))))))))
+
 (ert-deftest nucleo-completion-space-separated-highlight-test ()
   (should (equal-including-properties
            (nucleo-completion-highlight "foo bar" "foo/bar")

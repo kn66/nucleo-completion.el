@@ -60,11 +60,42 @@ alphabetical order is used after comparing length.  This only
 affects candidates with the same Nucleo score."
   :type 'boolean)
 
+(defcustom nucleo-completion-highlight-score-bands nil
+  "Whether to highlight high- and low-scoring completion candidates.
+When non-nil, candidates with exact word matches or scores close to
+the best score use `nucleo-completion-high-score-face'.  Other
+scored candidates use `nucleo-completion-low-score-face'."
+  :type 'boolean)
+
+(defcustom nucleo-completion-high-score-ratio 0.85
+  "Minimum ratio to the best score for high-score candidate highlighting.
+For example, 0.85 means candidates whose score is at least 85% of
+the best score are highlighted with
+`nucleo-completion-high-score-face'.  Exact word matches are always
+treated as high-scoring candidates."
+  :type 'number)
+
+(defface nucleo-completion-high-score-face
+  '((t (:weight bold :underline t)))
+  "Face used for candidates in the high score band."
+  :group 'nucleo-completion)
+
+(defface nucleo-completion-low-score-face
+  '((t (:inherit shadow)))
+  "Face used for candidates below the high score band."
+  :group 'nucleo-completion)
+
 (defvar nucleo-completion--filtering-p nil)
 
 (defconst nucleo-completion--directory
   (file-name-directory (or load-file-name byte-compile-current-file buffer-file-name))
   "Directory containing nucleo-completion.el.")
+
+(defun nucleo-completion--string-key (string)
+  "Return STRING without text properties."
+  (if (stringp string)
+      (substring-no-properties string)
+    string))
 
 (defun nucleo-completion--rust-library-name ()
   "Return Cargo's dynamic library file name for this platform."
@@ -253,6 +284,15 @@ expanders such as Migemo."
 (defun nucleo-completion--sort-with-module
     (needle candidates ignore-case &optional regexp-scored)
   "Sort CANDIDATES with the Rust module without dropping regexp-only matches."
+  (mapcar #'car
+          (nucleo-completion--sort-scored-with-module
+           needle candidates ignore-case regexp-scored)))
+
+(defun nucleo-completion--sort-scored-with-module
+    (needle candidates ignore-case &optional regexp-scored)
+  "Return scored CANDIDATES sorted with the Rust module.
+Keep regexp-only matches by merging REGEXP-SCORED entries that were
+not returned by the module."
   (let ((module-scored (nucleo-completion--scored-filter
                         needle candidates ignore-case))
         (regexp-scored (or regexp-scored
@@ -262,15 +302,14 @@ expanders such as Migemo."
         (seen (make-hash-table :test #'equal)))
     (dolist (entry module-scored)
       (puthash (car entry) t seen))
-    (mapcar #'car
-            (cl-stable-sort
-             (nconc module-scored
-                    (cl-loop for entry in regexp-scored
-                             unless (gethash (car entry) seen)
-                             collect entry))
-             (apply-partially
-              #'nucleo-completion--scored-entry-lessp
-              ignore-case)))))
+    (cl-stable-sort
+     (nconc module-scored
+            (cl-loop for entry in regexp-scored
+                     unless (gethash (car entry) seen)
+                     collect entry))
+     (apply-partially
+      #'nucleo-completion--scored-entry-lessp
+      ignore-case))))
 
 (defun nucleo-completion--scored-filter (needle candidates ignore-case)
   "Return matching CANDIDATES as (CANDIDATE . SCORE) pairs."
@@ -315,6 +354,61 @@ expanders such as Migemo."
                                ignore-case)))
     (nucleo-completion-filter needle candidates ignore-case)))
 
+(defun nucleo-completion--module-filter-with-scores
+    (needle candidates ignore-case)
+  "Filter CANDIDATES with the Rust module and keep scores."
+  (if (or nucleo-completion-sort-ties-by-length
+          nucleo-completion-sort-ties-alphabetically)
+      (cl-stable-sort (nucleo-completion--scored-filter
+                       needle candidates ignore-case)
+                      (apply-partially
+                       #'nucleo-completion--scored-entry-lessp
+                       ignore-case))
+    (nucleo-completion--scored-filter needle candidates ignore-case)))
+
+(defun nucleo-completion--exact-word-match-p (needle candidate)
+  "Return non-nil when every NEEDLE term occurs as a word in CANDIDATE."
+  (let ((case-fold-search completion-ignore-case))
+    (cl-every (lambda (term)
+                (string-match-p
+                 (concat "\\(?:\\`\\|[^[:alnum:]_]\\)"
+                         (regexp-quote term)
+                         "\\(?:\\'\\|[^[:alnum:]_]\\)")
+                 candidate))
+              (nucleo-completion--terms needle))))
+
+(defun nucleo-completion--high-score-p
+    (needle candidate score max-score)
+  "Return non-nil if CANDIDATE belongs to the high score band."
+  (or (nucleo-completion--exact-word-match-p needle candidate)
+      (and max-score
+           (> max-score 0)
+           (>= score (* max-score nucleo-completion-high-score-ratio)))))
+
+(defun nucleo-completion--score-band-face
+    (needle candidate score max-score)
+  "Return the score-band face for CANDIDATE."
+  (if (nucleo-completion--high-score-p needle candidate score max-score)
+      'nucleo-completion-high-score-face
+    'nucleo-completion-low-score-face))
+
+(defun nucleo-completion--apply-score-band
+    (needle haystack score max-score)
+  "Apply a score-band background to HAYSTACK."
+  (when (and nucleo-completion-highlight-score-bands score)
+    (add-face-text-property
+     0 (length haystack)
+     (nucleo-completion--score-band-face needle haystack score max-score)
+     t haystack))
+  haystack)
+
+(defun nucleo-completion--score-table (scored)
+  "Return a hash table mapping candidates to scores from SCORED."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (entry scored)
+      (puthash (nucleo-completion--string-key (car entry)) (cdr entry) table))
+    table))
+
 (defun nucleo-completion--highlight-regexp (regexp haystack)
   "Highlight REGEXP matches in HAYSTACK."
   (let ((start 0))
@@ -343,6 +437,13 @@ expanders such as Migemo."
         (nucleo-completion--highlight-regexp regexp haystack))))
   haystack)
 
+(defun nucleo-completion--highlight-candidate
+    (needle haystack &optional score max-score)
+  "Highlight HAYSTACK with match and optional score-band faces."
+  (setq haystack (nucleo-completion--apply-score-band
+                  needle haystack score max-score))
+  (nucleo-completion-highlight needle haystack))
+
 ;;;###autoload
 (defun nucleo-completion-all-completions (string table &optional pred point)
   "Get Nucleo completions of STRING in TABLE.
@@ -363,30 +464,54 @@ See `completion-all-completions' for the semantics of PRED and POINT."
          (all (if (and (string= prefix "") (stringp (car-safe table))
                        (not (or pred completion-regexp-list (string= needle ""))))
                   table
-                (all-completions prefix table pred))))
+                (all-completions prefix table pred)))
+         scored
+         score-table
+         max-score)
     (cond
      ((or (null all) (string= needle "")))
      ((and module-p expanded-regexp-p)
       (let ((regexp-scored
              (nucleo-completion--regexp-filter-with-scores needle all)))
-        (setq all (nucleo-completion--sort-with-module
-                   needle
-                   (mapcar #'car regexp-scored)
-                   completion-ignore-case
-                   regexp-scored))))
+        (if nucleo-completion-highlight-score-bands
+            (setq scored (nucleo-completion--sort-scored-with-module
+                          needle
+                          (mapcar #'car regexp-scored)
+                          completion-ignore-case
+                          regexp-scored)
+                  all (mapcar #'car scored))
+          (setq all (nucleo-completion--sort-with-module
+                     needle
+                     (mapcar #'car regexp-scored)
+                     completion-ignore-case
+                     regexp-scored)))))
      (module-p
-      (setq all (nucleo-completion--module-filter
-                 needle all completion-ignore-case)))
+      (if nucleo-completion-highlight-score-bands
+          (setq scored (nucleo-completion--module-filter-with-scores
+                        needle all completion-ignore-case)
+                all (mapcar #'car scored))
+        (setq all (nucleo-completion--module-filter
+                   needle all completion-ignore-case))))
      (t
       (setq all (nucleo-completion--fallback-filter needle all))))
+    (when scored
+      (setq max-score (cdar scored)
+            score-table (nucleo-completion--score-table scored)))
     (setq nucleo-completion--filtering-p (not (string= needle "")))
     (defvar completion-lazy-hilit-fn)
     (if (bound-and-true-p completion-lazy-hilit)
         (setq completion-lazy-hilit-fn
-              (apply-partially #'nucleo-completion-highlight needle))
+              (lambda (candidate)
+                (let ((score (and score-table
+                                  (gethash (substring-no-properties candidate)
+                                           score-table))))
+                  (nucleo-completion--highlight-candidate
+                   needle candidate score max-score))))
       (cl-loop repeat nucleo-completion-max-highlighted-completions
                for x in-ref all
-               do (setf x (nucleo-completion-highlight needle (copy-sequence x)))))
+               for score = (and score-table (gethash x score-table))
+               do (setf x (nucleo-completion--highlight-candidate
+                            needle (copy-sequence x) score max-score))))
     (and all (if (string= prefix "") all (nconc all (length prefix))))))
 
 ;;;###autoload

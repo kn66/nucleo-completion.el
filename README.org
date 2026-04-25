@@ -139,12 +139,70 @@ optionally refine candidates with the same Nucleo score:
 When both options are enabled, candidates are ordered by Nucleo score, then
 length, then alphabetical order.  Different Nucleo scores are not reordered.
 
+* Score Band Highlighting
+
+By default, ~nucleo-completion~ only highlights the matching parts of each
+candidate.  You can also highlight candidates by score band:
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-highlight-score-bands t)
+
+  ;; Treat candidates scoring at least 85% of the best score as high-score.
+  (setq nucleo-completion-high-score-ratio 0.85)
+#+end_src
+
+Candidates that contain every search term as an exact word are treated as
+high-score candidates regardless of the ratio.  Other scored candidates use
+~nucleo-completion-low-score-face~.  Customize
+~nucleo-completion-high-score-face~ and ~nucleo-completion-low-score-face~ to
+change the visual style.  The default faces avoid background colors so they do
+not conflict with completion UI selection highlights or color themes.
+
 * History Sorting
 
 ~nucleo-completion~ can be combined with Emacs' standard completion metadata.
 For example, ~savehist~ can persist minibuffer histories, and
 ~completion-category-overrides~ can use those histories as a final display sort.
 Candidates that are not in the history keep their ~nucleo~ order.
+
+Corfu users can keep Nucleo's score order while still promoting candidates from
+~corfu-history~ by using a stable history sort as
+~corfu-sort-override-function~:
+
+#+begin_src emacs-lisp
+  (with-eval-after-load 'corfu
+    (defun my-corfu-nucleo-history-sort (candidates)
+      "Apply display-sort-function, then promote Corfu history."
+      (let* ((display-sort-func (corfu--metadata-get 'display-sort-function))
+             (candidates
+              (if display-sort-func
+                  (funcall display-sort-func candidates)
+                candidates)))
+        (if (and (boundp 'corfu-history) corfu-history)
+            (let ((rank (make-hash-table :test #'equal)))
+              (cl-loop for item in corfu-history
+                       for i from 0
+                       unless (gethash item rank)
+                       do (puthash item i rank))
+              (cl-stable-sort
+               candidates
+               (lambda (a b)
+                 (< (gethash (substring-no-properties a)
+                             rank most-positive-fixnum)
+                    (gethash (substring-no-properties b)
+                             rank most-positive-fixnum)))))
+          candidates)))
+
+    (setopt corfu-sort-override-function #'my-corfu-nucleo-history-sort))
+#+end_src
+
+This differs from applying ~corfu-sort-function~ after
+~display-sort-function~.  ~corfu-history-mode~ overrides
+~corfu-sort-function~ with a sorter that uses length/alphabetical order for
+ties, which can reorder candidates that Nucleo already sorted by score.  The
+example above only promotes history matches; candidates with the same history
+rank, including candidates not found in history, keep their existing Nucleo
+order.
 
 This example sorts ~M-x~ candidates by ~extended-command-history~:
 
