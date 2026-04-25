@@ -117,6 +117,12 @@ Emacs must be built with dynamic module support. You can check this with
 Behavior and verification details are maintained in
 ~spec/nucleo-completion.org~.
 
+* Acknowledgements
+
+This package was inspired in part by ~hotfuzz~. Its performance is excellent,
+and I am grateful to the author for creating and sharing such a fast Emacs
+fuzzy matching package.
+
 * History Sorting
 
 ~nucleo-completion~ can be combined with Emacs' standard completion metadata.
