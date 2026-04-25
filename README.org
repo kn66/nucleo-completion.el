@@ -101,6 +101,51 @@ Emacs must be built with dynamic module support. You can check this with
 Behavior and verification details are maintained in
 ~spec/nucleo-completion.org~.
 
+* History Sorting
+
+~nucleo-completion~ can be combined with Emacs' standard completion metadata.
+For example, ~savehist~ can persist minibuffer histories, and
+~completion-category-overrides~ can use those histories as a final display sort.
+Candidates that are not in the history keep their ~nucleo~ order.
+
+This example sorts ~M-x~ candidates by ~extended-command-history~:
+
+#+begin_src emacs-lisp
+  (require 'cl-lib)
+
+  (savehist-mode 1)
+
+  (defun my-nucleo-sort-by-history (history candidates)
+    (let ((rank (make-hash-table :test #'equal))
+          (i 0))
+      (dolist (item history)
+        (puthash item i rank)
+        (setq i (1+ i)))
+      (mapcar #'cdr
+              (sort (cl-loop for candidate in candidates
+                             for index from 0
+                             collect (cons index candidate))
+                    (lambda (a b)
+                      (let* ((ca (substring-no-properties (cdr a)))
+                             (cb (substring-no-properties (cdr b)))
+                             (ra (gethash ca rank most-positive-fixnum))
+                             (rb (gethash cb rank most-positive-fixnum)))
+                        (if (= ra rb)
+                            (< (car a) (car b))
+                          (< ra rb))))))))
+
+  (defun my-nucleo-sort-commands-by-history (candidates)
+    (my-nucleo-sort-by-history extended-command-history candidates))
+
+  (add-to-list 'completion-category-overrides
+               '(command
+                 (display-sort-function . my-nucleo-sort-commands-by-history)))
+#+end_src
+
+Different completion categories use different history variables. For example,
+commands use ~extended-command-history~, while file completions commonly use
+~file-name-history~.
+
 * Regexp Expanders
 
 ~nucleo-completion-regexp-functions~ can add language-specific matchers such as
