@@ -9,15 +9,12 @@ module using the ~nucleo-matcher~ crate.
 :END:
 
 
-#+DOWNLOADED: screenshot @ 2026-04-25 22:12:41
-[[file:Screenshots/2026-04-25_22-12-41_screenshot.png]]
 
-#+DOWNLOADED: screenshot @ 2026-04-25 22:13:13
-[[file:Screenshots/2026-04-25_22-13-13_screenshot.png]]
+#+DOWNLOADED: screenshot @ 2026-04-26 08:10:52
+[[file:Screenshots/2026-04-26_08-10-52_screenshot.png]]
 
-[[file:Screenshots/vertico.gif]]
-
-[[file:Screenshots/corfu.gif]]
+#+DOWNLOADED: screenshot @ 2026-04-26 08:12:54
+[[file:Screenshots/2026-04-26_08-12-54_screenshot.png]]
 
 * Setup
 
