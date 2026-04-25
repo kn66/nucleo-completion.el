@@ -250,6 +250,22 @@
                     (nucleo-completion--highlight-candidate
                      "fb" (copy-sequence "foo-bar") 10 100)))))))
 
+(ert-deftest nucleo-completion-high-score-emphasis-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-high-score-ratio 0.85))
+    (let ((nucleo-completion-high-score-emphasis '(bold underline)))
+      (should (equal (nucleo-completion--score-band-face "foo" "foo-bar" 10 100)
+                     '(nucleo-completion-high-score-face bold underline))))
+    (let ((nucleo-completion-high-score-emphasis '(bold)))
+      (should (equal (nucleo-completion--score-band-face "foo" "foo-bar" 10 100)
+                     '(nucleo-completion-high-score-face bold))))
+    (let ((nucleo-completion-high-score-emphasis '(underline)))
+      (should (equal (nucleo-completion--score-band-face "foo" "foo-bar" 10 100)
+                     '(nucleo-completion-high-score-face underline))))
+    (let ((nucleo-completion-high-score-emphasis nil))
+      (should (equal (nucleo-completion--score-band-face "foo" "foo-bar" 10 100)
+                     '(nucleo-completion-high-score-face))))))
+
 (ert-deftest nucleo-completion-all-completions-score-band-test ()
   (let ((completion-ignore-case nil)
         (nucleo-completion-highlight-score-bands t)

@@ -146,6 +146,9 @@ candidate.  You can also highlight candidates by score band:
 
   ;; Treat candidates scoring at least 85% of the best score as high-score.
   (setq nucleo-completion-high-score-ratio 0.85)
+
+  ;; Emphasize high-score candidates with bold, underline, both, or neither.
+  (setq nucleo-completion-high-score-emphasis '(bold underline))
 #+end_src
 
 Candidates that contain every search term as an exact word are treated as

@@ -75,8 +75,16 @@ the best score are highlighted with
 treated as high-scoring candidates."
   :type 'number)
 
+(defcustom nucleo-completion-high-score-emphasis '(bold underline)
+  "Additional emphasis faces for high-score candidate highlighting.
+The value is a list containing `bold', `underline', both, or nil.
+This option only affects high-score candidates when
+`nucleo-completion-highlight-score-bands' is non-nil."
+  :type '(set (const :tag "Bold" bold)
+              (const :tag "Underline" underline)))
+
 (defface nucleo-completion-high-score-face
-  '((t (:weight bold :underline t)))
+  '((t nil))
   "Face used for candidates in the high score band."
   :group 'nucleo-completion)
 
@@ -389,7 +397,8 @@ not returned by the module."
     (needle candidate score max-score)
   "Return the score-band face for CANDIDATE."
   (if (nucleo-completion--high-score-p needle candidate score max-score)
-      'nucleo-completion-high-score-face
+      (append '(nucleo-completion-high-score-face)
+              nucleo-completion-high-score-emphasis)
     'nucleo-completion-low-score-face))
 
 (defun nucleo-completion--apply-score-band
