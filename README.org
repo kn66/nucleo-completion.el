@@ -258,6 +258,13 @@ pyim example:
 Terms are ANDed together. For each term, the built-in fuzzy subsequence matcher
 and configured regexp expanders are ORed together.
 
+When the Rust module is available, candidates that only match a configured
+regexp expander are not appended after all fuzzy matches.  They receive a
+lightweight synthetic score from the regexp match position, match length, and
+candidate length, then join the same score ordering as Nucleo matches.  This
+keeps Migemo-style dictionary matches near similarly strong literal/fuzzy
+matches while avoiding a second regexp pass during sorting.
+
 To keep ~nucleo~ scoring in Corfu but disable Migemo/pyim-style regexp expansion
 there, make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
 

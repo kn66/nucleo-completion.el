@@ -194,26 +194,83 @@ least one regexp from every group."
 
 (defun nucleo-completion--regexp-filter (needle candidates)
   "Filter CANDIDATES with fuzzy and configured regexp matchers."
+  (mapcar #'car
+          (nucleo-completion--regexp-filter-with-scores needle candidates)))
+
+(defun nucleo-completion--synthetic-regexp-score
+    (match-start match-end candidate-length expanded-regexp-p)
+  "Return a lightweight score for one regexp match.
+The scale is intentionally close to common Nucleo substring scores
+without trying to exactly reproduce Nucleo's scoring algorithm."
+  (+ 50
+     (if (zerop match-start)
+         32
+       (max 0 (- 24 match-start)))
+     (max 0 (- 24 (- match-end match-start)))
+     (if (and (zerop match-start)
+              (= match-end candidate-length))
+         24
+       0)
+     (if expanded-regexp-p 16 0)))
+
+(defun nucleo-completion--term-regexp-score (regexps candidate)
+  "Return the best synthetic score for CANDIDATE against REGEXPS.
+Return nil when no regexp matches.  The first regexp in REGEXPS is
+the built-in fuzzy subsequence regexp; later regexps are configured
+expanders such as Migemo."
+  (cl-loop for regexp in regexps
+           for index from 0
+           when (string-match regexp candidate)
+           maximize (nucleo-completion--synthetic-regexp-score
+                     (match-beginning 0)
+                     (match-end 0)
+                     (length candidate)
+                     (> index 0))))
+
+(defun nucleo-completion--candidate-regexp-score (regexp-groups candidate)
+  "Return CANDIDATE's synthetic regexp score, or nil if it does not match."
+  (cl-loop for regexps in regexp-groups
+           for term-score = (nucleo-completion--term-regexp-score
+                             regexps candidate)
+           if term-score
+           sum term-score
+           else return nil))
+
+(defun nucleo-completion--regexp-filter-with-scores (needle candidates)
+  "Return matching CANDIDATES as (CANDIDATE . SYNTHETIC-SCORE) pairs."
   (let ((case-fold-search completion-ignore-case)
         (regexp-groups (nucleo-completion--term-regexp-groups needle)))
     (cl-loop for candidate in candidates
-             when (nucleo-completion--regexp-match-p regexp-groups candidate)
-             collect candidate)))
+             for score = (nucleo-completion--candidate-regexp-score
+                          regexp-groups candidate)
+             when score
+             collect (cons candidate score))))
 
 (defun nucleo-completion--fallback-filter (needle candidates)
   "Filter CANDIDATES against NEEDLE without Rust module sorting."
   (nucleo-completion--regexp-filter needle candidates))
 
-(defun nucleo-completion--sort-with-module (needle candidates ignore-case)
+(defun nucleo-completion--sort-with-module
+    (needle candidates ignore-case &optional regexp-scored)
   "Sort CANDIDATES with the Rust module without dropping regexp-only matches."
-  (let* ((scored (nucleo-completion--module-filter needle candidates ignore-case))
-         (seen (make-hash-table :test #'equal)))
-    (dolist (candidate scored)
-      (puthash candidate t seen))
-    (nconc scored
-           (cl-loop for candidate in candidates
-                    unless (gethash candidate seen)
-                    collect candidate))))
+  (let ((module-scored (nucleo-completion--scored-filter
+                        needle candidates ignore-case))
+        (regexp-scored (or regexp-scored
+                           (mapcar (lambda (candidate)
+                                     (cons candidate 0))
+                                   candidates)))
+        (seen (make-hash-table :test #'equal)))
+    (dolist (entry module-scored)
+      (puthash (car entry) t seen))
+    (mapcar #'car
+            (cl-stable-sort
+             (nconc module-scored
+                    (cl-loop for entry in regexp-scored
+                             unless (gethash (car entry) seen)
+                             collect entry))
+             (apply-partially
+              #'nucleo-completion--scored-entry-lessp
+              ignore-case)))))
 
 (defun nucleo-completion--scored-filter (needle candidates ignore-case)
   "Return matching CANDIDATES as (CANDIDATE . SCORE) pairs."
@@ -310,10 +367,13 @@ See `completion-all-completions' for the semantics of PRED and POINT."
     (cond
      ((or (null all) (string= needle "")))
      ((and module-p expanded-regexp-p)
-      (setq all (nucleo-completion--sort-with-module
-                 needle
-                 (nucleo-completion--regexp-filter needle all)
-                 completion-ignore-case)))
+      (let ((regexp-scored
+             (nucleo-completion--regexp-filter-with-scores needle all)))
+        (setq all (nucleo-completion--sort-with-module
+                   needle
+                   (mapcar #'car regexp-scored)
+                   completion-ignore-case
+                   regexp-scored))))
      (module-p
       (setq all (nucleo-completion--module-filter
                  needle all completion-ignore-case)))
