@@ -211,8 +211,8 @@ Complete ~use-package~ example with Migemo and Corfu:
 
 #+begin_src emacs-lisp
   (use-package nucleo-completion
-    :vc (:url "https://github.com/kn66/nucleo-completion.el.git"
-         :rev :newest)
+    :vc ( :url "https://github.com/kn66/nucleo-completion.el.git"
+          :rev :newest)
     :config
     (setopt completion-styles '(nucleo basic))
 
