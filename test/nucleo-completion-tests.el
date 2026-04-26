@@ -286,6 +286,39 @@
         (should (memq 'nucleo-completion-low-score-face
                       (ensure-list (get-text-property 0 'face (cadr all)))))))))
 
+(ert-deftest nucleo-completion-regexp-only-match-not-score-band-highlighted-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-highlight-score-bands t)
+        (nucleo-completion-high-score-ratio 0.85)
+        (nucleo-completion-max-highlighted-completions 10)
+        (nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (when (string= term "nihon")
+                   "日本")))))
+    (cl-letf (((symbol-function 'nucleo-completion-filter)
+               (lambda (_needle _candidates _ignore-case)
+                 '("roman-nihon")))
+              ((symbol-function 'nucleo-completion-scored-filter)
+               (lambda (_needle candidates _ignore-case)
+                 (cl-loop for candidate in candidates
+                          when (string= candidate "roman-nihon")
+                          collect (cons candidate 128)))))
+      (let* ((all (nucleo-completion-all-completions
+                   "nihon" '("日本語" "roman-nihon")))
+             (plain (nucleo-completion-tests--plain all))
+             (regexp-only (nth (cl-position "日本語" plain :test #'equal) all))
+             (module-match (nth (cl-position "roman-nihon" plain :test #'equal)
+                                all))
+             (regexp-only-faces (ensure-list
+                                 (get-text-property 0 'face regexp-only)))
+             (module-faces (ensure-list
+                            (get-text-property 0 'face module-match))))
+        (should (equal plain '("roman-nihon" "日本語")))
+        (should (memq 'completions-common-part regexp-only-faces))
+        (should-not (memq 'nucleo-completion-high-score-face regexp-only-faces))
+        (should-not (memq 'nucleo-completion-low-score-face regexp-only-faces))
+        (should (memq 'nucleo-completion-high-score-face module-faces))))))
+
 (ert-deftest nucleo-completion-space-separated-highlight-test ()
   (should (equal-including-properties
            (nucleo-completion-highlight "foo bar" "foo/bar")

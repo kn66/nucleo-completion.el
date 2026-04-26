@@ -309,6 +309,15 @@ Honor IGNORE-CASE.
 
 Keep regexp-only matches by merging REGEXP-SCORED entries that were
 not returned by the module."
+  (car (nucleo-completion--sort-and-module-scored-with-module
+        needle candidates ignore-case regexp-scored)))
+
+(defun nucleo-completion--sort-and-module-scored-with-module
+    (needle candidates ignore-case &optional regexp-scored)
+  "Return sorted scores and Rust-module scores for CANDIDATES.
+The car is the full sorted scored list, including regexp-only
+matches from REGEXP-SCORED.  The cdr is only the scored list
+returned by the Rust module."
   (let ((module-scored (nucleo-completion--scored-filter
                         needle candidates ignore-case))
         (regexp-scored (or regexp-scored
@@ -318,14 +327,16 @@ not returned by the module."
         (seen (make-hash-table :test #'equal)))
     (dolist (entry module-scored)
       (puthash (car entry) t seen))
-    (cl-stable-sort
-     (nconc module-scored
-            (cl-loop for entry in regexp-scored
-                     unless (gethash (car entry) seen)
-                     collect entry))
-     (apply-partially
-      #'nucleo-completion--scored-entry-lessp
-      ignore-case))))
+    (cons
+     (cl-stable-sort
+      (append module-scored
+              (cl-loop for entry in regexp-scored
+                       unless (gethash (car entry) seen)
+                       collect entry))
+      (apply-partially
+       #'nucleo-completion--scored-entry-lessp
+       ignore-case))
+     module-scored)))
 
 (defun nucleo-completion--scored-filter (needle candidates ignore-case)
   "Return CANDIDATES matching NEEDLE as (CANDIDATE . SCORE) pairs.
@@ -492,6 +503,7 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                   table
                 (all-completions prefix table pred)))
          scored
+         visual-scored
          score-table
          max-score)
     (cond
@@ -500,12 +512,15 @@ See `completion-all-completions' for the semantics of PRED and POINT."
       (let ((regexp-scored
              (nucleo-completion--regexp-filter-with-scores needle all)))
         (if nucleo-completion-highlight-score-bands
-            (setq scored (nucleo-completion--sort-scored-with-module
-                          needle
-                          (mapcar #'car regexp-scored)
-                          completion-ignore-case
-                          regexp-scored)
-                  all (mapcar #'car scored))
+            (let ((sorted-and-module-scored
+                   (nucleo-completion--sort-and-module-scored-with-module
+                    needle
+                    (mapcar #'car regexp-scored)
+                    completion-ignore-case
+                    regexp-scored)))
+              (setq scored (car sorted-and-module-scored)
+                    visual-scored (cdr sorted-and-module-scored)
+                    all (mapcar #'car scored)))
           (setq all (nucleo-completion--sort-with-module
                      needle
                      (mapcar #'car regexp-scored)
@@ -515,14 +530,15 @@ See `completion-all-completions' for the semantics of PRED and POINT."
       (if nucleo-completion-highlight-score-bands
           (setq scored (nucleo-completion--module-filter-with-scores
                         needle all completion-ignore-case)
+                visual-scored scored
                 all (mapcar #'car scored))
         (setq all (nucleo-completion--module-filter
                    needle all completion-ignore-case))))
      (t
       (setq all (nucleo-completion--fallback-filter needle all))))
-    (when scored
-      (setq max-score (cdar scored)
-            score-table (nucleo-completion--score-table scored)))
+    (when visual-scored
+      (setq max-score (cdar visual-scored)
+            score-table (nucleo-completion--score-table visual-scored)))
     (setq nucleo-completion--filtering-p (not (string= needle "")))
     (defvar completion-lazy-hilit-fn)
     (if (bound-and-true-p completion-lazy-hilit)

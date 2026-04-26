@@ -323,6 +323,10 @@ candidate length, then join the same score ordering as Nucleo matches.  This
 keeps Migemo-style dictionary matches near similarly strong literal/fuzzy
 matches while avoiding a second regexp pass during sorting.
 
+Synthetic regexp scores are only used for ordering.  Candidates that match only
+through a regexp expander are not dimmed by score-band highlighting; only their
+matched text is highlighted.
+
 To keep ~nucleo~ scoring in Corfu but disable Migemo/pyim-style regexp expansion
 there, make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
 

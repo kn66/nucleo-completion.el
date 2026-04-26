@@ -190,6 +190,8 @@ highlight に加えて候補全体へ score band の face を付ける。全 ter
 単語として完全一致する候補、または ~nucleo-completion-high-score-ratio~ に基づき
 最高 score に近い候補は ~nucleo-completion-high-score-face~ を使う。それ以外の
 scored candidates は ~nucleo-completion-low-score-face~ を使う。
+regexp expander でしか一致しない候補は score band face の対象にせず、
+regexp match 部分だけを highlight する。
 high-score 候補には ~nucleo-completion-high-score-emphasis~ で指定された追加 face
 も付与する。既定では ~bold~ と ~underline~ の両方を付与するが、テーマが
 太字や下線を別用途に使う場合は片方、または両方を無効化できる。
@@ -205,6 +207,8 @@ lazy highlight をサポートする UI では ~completion-lazy-hilit-fn~ を設
 - regexp expander でしか一致しない候補は、Rust module sorting 後も落とさない。
 - regexp expander でしか一致しない候補は、match 位置、match 長、候補長から軽量な疑似 score を作り、
   Nucleo score 付き候補と同じ並び替えに入れる。
+- regexp expander でしか一致しない候補の疑似 score は並び替え専用で、score band highlight
+  には使わない。
 - 同点 sorting は Nucleo score が同じ候補にだけ適用し、異なる score の順序は維持する。
 - Rust module がない場合も、Elisp fallback により絞り込みは行う。
 - case sensitivity は ~completion-ignore-case~ に従う。
