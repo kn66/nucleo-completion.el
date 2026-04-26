@@ -232,13 +232,17 @@ least one regexp from every group."
             regexp-groups))
 
 (defun nucleo-completion--regexp-filter (needle candidates)
-  "Filter CANDIDATES with fuzzy and configured regexp matchers."
+  "Filter CANDIDATES against NEEDLE with fuzzy and configured regexp matchers."
   (mapcar #'car
           (nucleo-completion--regexp-filter-with-scores needle candidates)))
 
 (defun nucleo-completion--synthetic-regexp-score
     (match-start match-end candidate-length expanded-regexp-p)
   "Return a lightweight score for one regexp match.
+MATCH-START and MATCH-END bound the match in a candidate of
+CANDIDATE-LENGTH.  EXPANDED-REGEXP-P means the match came from a
+configured regexp expander.
+
 The scale is intentionally close to common Nucleo substring scores
 without trying to exactly reproduce Nucleo's scoring algorithm."
   (+ 50
@@ -267,7 +271,7 @@ expanders such as Migemo."
                      (> index 0))))
 
 (defun nucleo-completion--candidate-regexp-score (regexp-groups candidate)
-  "Return CANDIDATE's synthetic regexp score, or nil if it does not match."
+  "Return CANDIDATE's REGEXP-GROUPS score, or nil if it does not match."
   (cl-loop for regexps in regexp-groups
            for term-score = (nucleo-completion--term-regexp-score
                              regexps candidate)
@@ -276,7 +280,7 @@ expanders such as Migemo."
            else return nil))
 
 (defun nucleo-completion--regexp-filter-with-scores (needle candidates)
-  "Return matching CANDIDATES as (CANDIDATE . SYNTHETIC-SCORE) pairs."
+  "Return CANDIDATES matching NEEDLE as (CANDIDATE . SYNTHETIC-SCORE) pairs."
   (let ((case-fold-search completion-ignore-case)
         (regexp-groups (nucleo-completion--term-regexp-groups needle)))
     (cl-loop for candidate in candidates
@@ -291,14 +295,17 @@ expanders such as Migemo."
 
 (defun nucleo-completion--sort-with-module
     (needle candidates ignore-case &optional regexp-scored)
-  "Sort CANDIDATES with the Rust module without dropping regexp-only matches."
+  "Sort CANDIDATES against NEEDLE with the Rust module.
+Honor IGNORE-CASE and preserve optional REGEXP-SCORED regexp-only matches."
   (mapcar #'car
           (nucleo-completion--sort-scored-with-module
            needle candidates ignore-case regexp-scored)))
 
 (defun nucleo-completion--sort-scored-with-module
     (needle candidates ignore-case &optional regexp-scored)
-  "Return scored CANDIDATES sorted with the Rust module.
+  "Return scored CANDIDATES for NEEDLE sorted with the Rust module.
+Honor IGNORE-CASE.
+
 Keep regexp-only matches by merging REGEXP-SCORED entries that were
 not returned by the module."
   (let ((module-scored (nucleo-completion--scored-filter
@@ -320,7 +327,8 @@ not returned by the module."
       ignore-case))))
 
 (defun nucleo-completion--scored-filter (needle candidates ignore-case)
-  "Return matching CANDIDATES as (CANDIDATE . SCORE) pairs."
+  "Return CANDIDATES matching NEEDLE as (CANDIDATE . SCORE) pairs.
+Honor IGNORE-CASE."
   (if (fboundp 'nucleo-completion-scored-filter)
       (nucleo-completion-scored-filter needle candidates ignore-case)
     (cl-loop for candidate in candidates
@@ -329,13 +337,15 @@ not returned by the module."
              collect (cons candidate score))))
 
 (defun nucleo-completion--string-lessp (a b ignore-case)
-  "Return non-nil when A should sort before B alphabetically."
+  "Return non-nil when A should sort before B alphabetically.
+Honor IGNORE-CASE."
   (if ignore-case
       (string-lessp (downcase a) (downcase b))
     (string-lessp a b)))
 
 (defun nucleo-completion--scored-entry-lessp (ignore-case a b)
-  "Return non-nil when scored entry A should sort before B."
+  "Return non-nil when scored entry A should sort before B.
+Honor IGNORE-CASE."
   (let ((a-candidate (car a))
         (a-score (cdr a))
         (b-candidate (car b))
@@ -351,7 +361,8 @@ not returned by the module."
      (t nil))))
 
 (defun nucleo-completion--module-filter (needle candidates ignore-case)
-  "Filter and sort CANDIDATES with the Rust module."
+  "Filter and sort CANDIDATES against NEEDLE with the Rust module.
+Honor IGNORE-CASE."
   (if (or nucleo-completion-sort-ties-by-length
           nucleo-completion-sort-ties-alphabetically)
       (mapcar #'car
@@ -364,7 +375,8 @@ not returned by the module."
 
 (defun nucleo-completion--module-filter-with-scores
     (needle candidates ignore-case)
-  "Filter CANDIDATES with the Rust module and keep scores."
+  "Filter CANDIDATES against NEEDLE with the Rust module and keep scores.
+Honor IGNORE-CASE."
   (if (or nucleo-completion-sort-ties-by-length
           nucleo-completion-sort-ties-alphabetically)
       (cl-stable-sort (nucleo-completion--scored-filter
@@ -387,7 +399,8 @@ not returned by the module."
 
 (defun nucleo-completion--high-score-p
     (needle candidate score max-score)
-  "Return non-nil if CANDIDATE belongs to the high score band."
+  "Return non-nil if CANDIDATE belongs to NEEDLE's high score band.
+SCORE is compared to MAX-SCORE."
   (or (nucleo-completion--exact-word-match-p needle candidate)
       (and max-score
            (> max-score 0)
@@ -395,7 +408,8 @@ not returned by the module."
 
 (defun nucleo-completion--score-band-face
     (needle candidate score max-score)
-  "Return the score-band face for CANDIDATE."
+  "Return the score-band face for CANDIDATE matching NEEDLE.
+SCORE is compared to MAX-SCORE."
   (if (nucleo-completion--high-score-p needle candidate score max-score)
       (append '(nucleo-completion-high-score-face)
               nucleo-completion-high-score-emphasis)
@@ -403,7 +417,8 @@ not returned by the module."
 
 (defun nucleo-completion--apply-score-band
     (needle haystack score max-score)
-  "Apply a score-band background to HAYSTACK."
+  "Apply a score-band background to HAYSTACK for NEEDLE.
+SCORE is compared to MAX-SCORE."
   (when (and nucleo-completion-highlight-score-bands score)
     (add-face-text-property
      0 (length haystack)
@@ -448,7 +463,8 @@ not returned by the module."
 
 (defun nucleo-completion--highlight-candidate
     (needle haystack &optional score max-score)
-  "Highlight HAYSTACK with match and optional score-band faces."
+  "Highlight HAYSTACK against NEEDLE with match and optional score-band faces.
+SCORE is compared to MAX-SCORE when both are non-nil."
   (setq haystack (nucleo-completion--apply-score-band
                   needle haystack score max-score))
   (nucleo-completion-highlight needle haystack))
