@@ -209,11 +209,11 @@
 (ert-deftest nucleo-completion-adjust-metadata-test ()
   (let ((nucleo-completion--filtering-p t))
     (should (eq (completion-metadata-get
-                 (nucleo-completion--adjust-metadata '(metadata (category . file)))
+                 (nucleo-completion-adjust-metadata '(metadata (category . file)))
                  'display-sort-function)
                 'identity)))
   (let ((nucleo-completion--filtering-p nil))
-    (should (equal (nucleo-completion--adjust-metadata
+    (should (equal (nucleo-completion-adjust-metadata
                     '(metadata (category . file)))
                    '(metadata (category . file))))))
 
