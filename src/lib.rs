@@ -1,6 +1,9 @@
+use std::cell::RefCell;
+use std::thread;
+
 use emacs::{defun, Env, IntoLisp, Result, Value};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 emacs::plugin_is_GPL_compatible!();
 
@@ -13,15 +16,9 @@ fn init(_: &Env) -> Result<()> {
     Ok(())
 }
 
-struct Candidate<'e> {
-    value: Value<'e>,
-    text: String,
-}
-
-impl AsRef<str> for Candidate<'_> {
-    fn as_ref(&self) -> &str {
-        &self.text
-    }
+struct ScoredIndex {
+    index: usize,
+    score: u32,
 }
 
 fn case_matching(ignore_case: bool) -> CaseMatching {
@@ -32,24 +29,113 @@ fn case_matching(ignore_case: bool) -> CaseMatching {
     }
 }
 
-fn new_matcher() -> Matcher {
-    Matcher::new(Config::DEFAULT.match_paths())
+thread_local! {
+    static MATCHER: RefCell<Matcher> = RefCell::new(Matcher::new(Config::DEFAULT.match_paths()));
+}
+
+fn with_matcher<T>(function: impl FnOnce(&mut Matcher) -> T) -> T {
+    MATCHER.with(|matcher| function(&mut matcher.borrow_mut()))
+}
+
+fn collect_candidates<'e>(candidates: Value<'e>) -> Result<(Vec<Value<'e>>, Vec<String>)> {
+    let mut values = Vec::new();
+    let mut texts = Vec::new();
+    let mut list = candidates;
+
+    while list.is_not_nil() {
+        let value: Value<'e> = list.car()?;
+        let text: String = value.into_rust()?;
+        values.push(value);
+        texts.push(text);
+        list = list.cdr()?;
+    }
+
+    Ok((values, texts))
+}
+
+fn score_items(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
+    const PARALLEL_THRESHOLD: usize = 2048;
+
+    if texts.len() < PARALLEL_THRESHOLD {
+        return sort_scored(with_matcher(|matcher| {
+            score_item_range(pattern, texts, 0, matcher)
+        }));
+    }
+
+    let workers = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(texts.len().div_ceil(PARALLEL_THRESHOLD))
+        .max(1);
+
+    if workers == 1 {
+        return sort_scored(with_matcher(|matcher| {
+            score_item_range(pattern, texts, 0, matcher)
+        }));
+    }
+
+    let chunk_size = texts.len().div_ceil(workers);
+    let scored = thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for (chunk_index, chunk) in texts.chunks(chunk_size).enumerate() {
+            let offset = chunk_index * chunk_size;
+            handles.push(scope.spawn(move || {
+                let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+                score_item_range(pattern, chunk, offset, &mut matcher)
+            }));
+        }
+
+        let mut scored = Vec::new();
+        for handle in handles {
+            scored.extend(handle.join().expect("nucleo worker thread panicked"));
+        }
+        scored
+    });
+
+    sort_scored(scored)
+}
+
+fn sort_scored(mut scored: Vec<ScoredIndex>) -> Vec<ScoredIndex> {
+    scored.sort_unstable_by(|a, b| b.score.cmp(&a.score).then_with(|| a.index.cmp(&b.index)));
+    scored
+}
+
+fn score_item_range(
+    pattern: &Pattern,
+    texts: &[String],
+    offset: usize,
+    matcher: &mut Matcher,
+) -> Vec<ScoredIndex> {
+    let mut buf = Vec::new();
+    texts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, text)| {
+            pattern
+                .score(Utf32Str::new(text, &mut buf), matcher)
+                .map(|score| ScoredIndex {
+                    index: offset + index,
+                    score,
+                })
+        })
+        .collect()
 }
 
 #[defun]
 fn score(pattern: String, candidate: String, ignore_case: Value) -> Result<Option<u32>> {
-    let mut matcher = new_matcher();
     let pattern = Pattern::parse(
         &pattern,
         case_matching(ignore_case.is_not_nil()),
         Normalization::Smart,
     );
 
-    Ok(pattern
-        .match_list([candidate], &mut matcher)
-        .into_iter()
-        .next()
-        .map(|(_, score)| score))
+    Ok(with_matcher(|matcher| {
+        pattern
+            .match_list([candidate], matcher)
+            .into_iter()
+            .next()
+            .map(|(_, score)| score)
+    }))
 }
 
 #[defun]
@@ -59,27 +145,17 @@ fn filter<'e>(
     candidates: Value<'e>,
     ignore_case: Value<'e>,
 ) -> Result<Value<'e>> {
-    let mut items = Vec::new();
-    let mut list = candidates;
-
-    while list.is_not_nil() {
-        let value: Value<'e> = list.car()?;
-        let text: String = value.into_rust()?;
-        items.push(Candidate { value, text });
-        list = list.cdr()?;
-    }
-
-    let mut matcher = new_matcher();
+    let (values, texts) = collect_candidates(candidates)?;
     let pattern = Pattern::parse(
         &pattern,
         case_matching(ignore_case.is_not_nil()),
         Normalization::Smart,
     );
-    let matches = pattern.match_list(items, &mut matcher);
+    let matches = score_items(&pattern, &texts);
 
     let mut result = env.intern("nil")?;
-    for (candidate, _) in matches.into_iter().rev() {
-        result = env.cons(candidate.value, result)?;
+    for scored in matches.into_iter().rev() {
+        result = env.cons(values[scored.index], result)?;
     }
 
     Ok(result)
@@ -92,27 +168,17 @@ fn scored_filter<'e>(
     candidates: Value<'e>,
     ignore_case: Value<'e>,
 ) -> Result<Value<'e>> {
-    let mut items = Vec::new();
-    let mut list = candidates;
-
-    while list.is_not_nil() {
-        let value: Value<'e> = list.car()?;
-        let text: String = value.into_rust()?;
-        items.push(Candidate { value, text });
-        list = list.cdr()?;
-    }
-
-    let mut matcher = new_matcher();
+    let (values, texts) = collect_candidates(candidates)?;
     let pattern = Pattern::parse(
         &pattern,
         case_matching(ignore_case.is_not_nil()),
         Normalization::Smart,
     );
-    let matches = pattern.match_list(items, &mut matcher);
+    let matches = score_items(&pattern, &texts);
 
     let mut result = env.intern("nil")?;
-    for (candidate, score) in matches.into_iter().rev() {
-        let pair = env.cons(candidate.value, score.into_lisp(env)?)?;
+    for scored in matches.into_iter().rev() {
+        let pair = env.cons(values[scored.index], scored.score.into_lisp(env)?)?;
         result = env.cons(pair, result)?;
     }
 
