@@ -3,7 +3,7 @@
 ;; Copyright (C) 2026
 
 ;; Author: Nobu
-;; Version: 0.1.2
+;; Version: 0.1.3
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
