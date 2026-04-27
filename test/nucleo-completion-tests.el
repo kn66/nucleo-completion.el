@@ -59,6 +59,35 @@
                      "fb" '("foobar" "fxxx" "foo-baz" "" "fb")))
                    '("fb" "foo-baz" "foobar")))))
 
+(ert-deftest nucleo-completion-fallback-filter-only-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-sort-ties-by-length t)
+        (nucleo-completion-sort-ties-alphabetically t)
+        (nucleo-completion-highlight-score-bands t)
+        (nucleo-completion-max-highlighted-completions 10))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil))
+              ((symbol-function 'nucleo-completion-filter)
+               (lambda (&rest _)
+                 (error "fallback must not call the Rust filter")))
+              ((symbol-function 'nucleo-completion-scored-filter)
+               (lambda (&rest _)
+                 (error "fallback must not call the Rust scorer")))
+              ((symbol-function 'nucleo-completion-sorted-filter)
+               (lambda (&rest _)
+                 (error "fallback must not call the Rust sorter")))
+              ((symbol-function 'nucleo-completion-sorted-scored-filter)
+               (lambda (&rest _)
+                 (error "fallback must not call the Rust scored sorter"))))
+      (let ((all (nucleo-completion-all-completions
+                  "fb" '("foo-baz" "fb" "foobar" "bar"))))
+        (should (equal (nucleo-completion-tests--plain all)
+                       '("foo-baz" "fb" "foobar")))
+        (dolist (candidate all)
+          (let ((faces (ensure-list (get-text-property 0 'face candidate))))
+            (should-not (memq 'nucleo-completion-high-score-face faces))
+            (should-not (memq 'nucleo-completion-low-score-face faces))))))))
+
 (ert-deftest nucleo-completion-case-sensitivity-test ()
   (let ((candidates '("alpha" "Alpha" "ALPHA")))
     (let ((completion-ignore-case nil))
@@ -108,7 +137,7 @@
     (should (equal (nucleo-completion-tests--plain
                     (nucleo-completion-all-completions
                      "nihon" '("日本語" "nihon-go" "英語")))
-                   '("nihon-go" "日本語")))
+                   '("日本語" "nihon-go")))
     (should (equal (nucleo-completion-tests--plain
                     (nucleo-completion-all-completions
                      "nihon go" '("日本語" "nihon-go" "英語" "日本史")))
@@ -135,7 +164,7 @@
         (candidates '("日本語" "nihon-go" "英語")))
     (should (equal (nucleo-completion-tests--plain
                     (nucleo-completion-all-completions "nihon" candidates))
-                   '("nihon-go" "日本語")))
+                   '("日本語" "nihon-go")))
     (with-temp-buffer
       (setq-local nucleo-completion-regexp-functions nil)
       (should (equal (nucleo-completion-tests--plain
@@ -153,12 +182,12 @@
                           when (string-match-p "roman" candidate)
                           collect (cons candidate 128)))))
       (should (equal (let* ((candidates '("日本語" "roman-nihon" "日本史"))
-                            (regexp-scored
-                             (nucleo-completion--regexp-filter-with-scores
+                            (regexp-pairs
+                             (nucleo-completion--regexp-filter-pairs
                               "nihon" candidates)))
-                       (nucleo-completion--sort-with-module
-                        "nihon" candidates nil regexp-scored))
-                     '("roman-nihon" "日本語" "日本史"))))))
+                     (nucleo-completion--sort-with-module
+                        "nihon" candidates nil regexp-pairs))
+                     '("日本語" "日本史" "roman-nihon"))))))
 
 (ert-deftest nucleo-completion-sort-with-module-scores-regexp-only-matches-test ()
   (let ((nucleo-completion-regexp-functions
@@ -169,11 +198,11 @@
                (lambda (_needle _candidates _ignore-case)
                  '(("roman-nihon" . 128) ("nihon-tail" . 110)))))
       (let* ((candidates '("roman-nihon" "nihon-tail" "日本"))
-             (regexp-scored
-              (nucleo-completion--regexp-filter-with-scores
+             (regexp-pairs
+              (nucleo-completion--regexp-filter-pairs
                "nihon" candidates)))
         (should (equal (nucleo-completion--sort-with-module
-                        "nihon" candidates nil regexp-scored)
+                        "nihon" candidates nil regexp-pairs)
                        '("日本" "roman-nihon" "nihon-tail")))))))
 
 (ert-deftest nucleo-completion-sort-ties-by-length-test ()
@@ -307,7 +336,13 @@
                  '("foo" "fob")))
               ((symbol-function 'nucleo-completion-scored-filter)
                (lambda (_needle _candidates _ignore-case)
-                 '(("foo" . 100) ("fob" . 50)))))
+                 '(("foo" . 100) ("fob" . 50))))
+              ((symbol-function 'nucleo-completion-sorted-filter)
+               (lambda (needle candidates ignore-case _by-length _alphabetically)
+                 (nucleo-completion-filter needle candidates ignore-case)))
+              ((symbol-function 'nucleo-completion-sorted-scored-filter)
+               (lambda (needle candidates ignore-case _by-length _alphabetically)
+                 (nucleo-completion-scored-filter needle candidates ignore-case))))
       (let ((all (nucleo-completion-all-completions
                   "fo" '("foo" "fob" "bar"))))
         (should (equal (nucleo-completion-tests--plain all)
@@ -339,7 +374,20 @@
                   (cl-remove-if-not
                    (lambda (candidate)
                      (string-prefix-p needle candidate))
-                   candidates))))
+                   candidates)))
+               ((symbol-function 'nucleo-completion-scored-filter)
+                (lambda (needle candidates _ignore-case)
+                  (mapcar (lambda (candidate) (cons candidate 1))
+                          (cl-remove-if-not
+                           (lambda (candidate)
+                             (string-prefix-p needle candidate))
+                           candidates))))
+               ((symbol-function 'nucleo-completion-sorted-filter)
+                (lambda (needle candidates ignore-case _by-length _alphabetically)
+                  (nucleo-completion-filter needle candidates ignore-case)))
+               ((symbol-function 'nucleo-completion-sorted-scored-filter)
+                (lambda (needle candidates ignore-case _by-length _alphabetically)
+                  (nucleo-completion-scored-filter needle candidates ignore-case))))
       (should (equal (nucleo-completion-tests--plain
                       (nucleo-completion-all-completions "f" table pred))
                      '("foo" "fob")))
@@ -369,12 +417,25 @@
                   (cl-remove-if-not
                    (lambda (candidate)
                      (string-prefix-p needle candidate))
-                   candidates))))
+                   candidates)))
+               ((symbol-function 'nucleo-completion-scored-filter)
+                (lambda (needle candidates _ignore-case)
+                  (mapcar (lambda (candidate) (cons candidate 1))
+                          (cl-remove-if-not
+                           (lambda (candidate)
+                             (string-prefix-p needle candidate))
+                           candidates))))
+               ((symbol-function 'nucleo-completion-sorted-filter)
+                (lambda (needle candidates ignore-case _by-length _alphabetically)
+                  (nucleo-completion-filter needle candidates ignore-case)))
+               ((symbol-function 'nucleo-completion-sorted-scored-filter)
+                (lambda (needle candidates ignore-case _by-length _alphabetically)
+                  (nucleo-completion-scored-filter needle candidates ignore-case))))
       (nucleo-completion-all-completions "f" table pred)
       (nucleo-completion-all-completions "fo" table pred)
       (should (= all-completions-count 2)))))
 
-(ert-deftest nucleo-completion-regexp-only-match-not-score-band-highlighted-test ()
+(ert-deftest nucleo-completion-regexp-only-match-is-high-score-highlighted-test ()
   (let ((completion-ignore-case nil)
         (nucleo-completion-highlight-score-bands t)
         (nucleo-completion-high-score-ratio 0.85)
@@ -390,7 +451,13 @@
                (lambda (_needle candidates _ignore-case)
                  (cl-loop for candidate in candidates
                           when (string= candidate "roman-nihon")
-                          collect (cons candidate 128)))))
+                          collect (cons candidate 128))))
+              ((symbol-function 'nucleo-completion-sorted-filter)
+               (lambda (needle candidates ignore-case _by-length _alphabetically)
+                 (nucleo-completion-filter needle candidates ignore-case)))
+              ((symbol-function 'nucleo-completion-sorted-scored-filter)
+               (lambda (needle candidates ignore-case _by-length _alphabetically)
+                 (nucleo-completion-scored-filter needle candidates ignore-case))))
       (let* ((all (nucleo-completion-all-completions
                    "nihon" '("日本語" "roman-nihon")))
              (plain (nucleo-completion-tests--plain all))
@@ -401,9 +468,9 @@
                                  (get-text-property 0 'face regexp-only)))
              (module-faces (ensure-list
                             (get-text-property 0 'face module-match))))
-        (should (equal plain '("roman-nihon" "日本語")))
+        (should (equal plain '("日本語" "roman-nihon")))
         (should (memq 'completions-common-part regexp-only-faces))
-        (should-not (memq 'nucleo-completion-high-score-face regexp-only-faces))
+        (should (memq 'nucleo-completion-high-score-face regexp-only-faces))
         (should-not (memq 'nucleo-completion-low-score-face regexp-only-faces))
         (should (memq 'nucleo-completion-high-score-face module-faces))))))
 

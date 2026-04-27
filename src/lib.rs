@@ -208,23 +208,6 @@ fn score_item_range(
 }
 
 #[defun]
-fn score(pattern: String, candidate: String, ignore_case: Value) -> Result<Option<u32>> {
-    let pattern = Pattern::parse(
-        &pattern,
-        case_matching(ignore_case.is_not_nil()),
-        Normalization::Smart,
-    );
-
-    Ok(with_matcher(|matcher| {
-        pattern
-            .match_list([candidate], matcher)
-            .into_iter()
-            .next()
-            .map(|(_, score)| score)
-    }))
-}
-
-#[defun]
 fn filter<'e>(
     env: &'e Env,
     pattern: String,

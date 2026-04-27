@@ -132,9 +132,11 @@ The cache is intentionally conservative and is skipped when
 active, since custom regexp expanders may not be monotonic as the query grows.
 
 Tie sorting with ~nucleo-completion-sort-ties-by-length~ and
-~nucleo-completion-sort-ties-alphabetically~ is handled by the Rust module when
-the bundled module is new enough.  Older modules fall back to Emacs Lisp sorting
-for compatibility.
+~nucleo-completion-sort-ties-alphabetically~ is handled by the Rust module.
+Older modules without the batch sorting API are ignored and the package uses the
+simple Emacs Lisp fallback filter instead.  The fallback only narrows
+candidates; it preserves input order and does not compute scores, apply tie
+sorting, or add score-band highlighting.
 
 * Acknowledgements
 
@@ -396,15 +398,10 @@ Terms are ANDed together. For each term, the built-in fuzzy subsequence matcher
 and configured regexp expanders are ORed together.
 
 When the Rust module is available, candidates that only match a configured
-regexp expander are not appended after all fuzzy matches.  They receive a
-lightweight synthetic score from the regexp match position, match length, and
-candidate length, then join the same score ordering as Nucleo matches.  This
-keeps Migemo-style dictionary matches near similarly strong literal/fuzzy
-matches while avoiding a second regexp pass during sorting.
-
-Synthetic regexp scores are only used for ordering.  Candidates that match only
-through a regexp expander are not dimmed by score-band highlighting; only their
-matched text is highlighted.
+regexp expander are treated as high-priority dictionary matches and are
+promoted before Nucleo-scored fuzzy matches.  When score-band highlighting is
+enabled, these regexp-only matches use the high-score face instead of being
+dimmed as low-score fuzzy matches.
 
 To keep ~nucleo~ scoring in Corfu but disable Migemo/pyim-style regexp expansion
 there, make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
