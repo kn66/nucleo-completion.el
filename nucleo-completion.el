@@ -28,6 +28,8 @@
 (declare-function nucleo-completion-filter "nucleo-completion-module")
 (declare-function nucleo-completion-score "nucleo-completion-module")
 (declare-function nucleo-completion-scored-filter "nucleo-completion-module")
+(declare-function nucleo-completion-sorted-filter "nucleo-completion-module")
+(declare-function nucleo-completion-sorted-scored-filter "nucleo-completion-module")
 
 (defgroup nucleo-completion nil
   "Nucleo-backed fuzzy completion style."
@@ -395,12 +397,17 @@ Honor IGNORE-CASE."
 Honor IGNORE-CASE."
   (if (or nucleo-completion-sort-ties-by-length
           nucleo-completion-sort-ties-alphabetically)
-      (mapcar #'car
-              (cl-stable-sort (nucleo-completion--scored-filter
-                               needle candidates ignore-case)
-                              (apply-partially
-                               #'nucleo-completion--scored-entry-lessp
-                               ignore-case)))
+      (if (fboundp 'nucleo-completion-sorted-filter)
+          (nucleo-completion-sorted-filter
+           needle candidates ignore-case
+           nucleo-completion-sort-ties-by-length
+           nucleo-completion-sort-ties-alphabetically)
+        (mapcar #'car
+                (cl-stable-sort (nucleo-completion--scored-filter
+                                 needle candidates ignore-case)
+                                (apply-partially
+                                 #'nucleo-completion--scored-entry-lessp
+                                 ignore-case))))
     (nucleo-completion-filter needle candidates ignore-case)))
 
 (defun nucleo-completion--module-filter-with-scores
@@ -409,11 +416,16 @@ Honor IGNORE-CASE."
 Honor IGNORE-CASE."
   (if (or nucleo-completion-sort-ties-by-length
           nucleo-completion-sort-ties-alphabetically)
-      (cl-stable-sort (nucleo-completion--scored-filter
-                       needle candidates ignore-case)
-                      (apply-partially
-                       #'nucleo-completion--scored-entry-lessp
-                       ignore-case))
+      (if (fboundp 'nucleo-completion-sorted-scored-filter)
+          (nucleo-completion-sorted-scored-filter
+           needle candidates ignore-case
+           nucleo-completion-sort-ties-by-length
+           nucleo-completion-sort-ties-alphabetically)
+        (cl-stable-sort (nucleo-completion--scored-filter
+                         needle candidates ignore-case)
+                        (apply-partially
+                         #'nucleo-completion--scored-entry-lessp
+                         ignore-case)))
     (nucleo-completion--scored-filter needle candidates ignore-case)))
 
 (defun nucleo-completion--cache-reusable-p

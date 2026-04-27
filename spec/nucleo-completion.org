@@ -170,6 +170,12 @@ company/corfu の typing latency で古い filter pass が UI を長く塞がな
 ~completion-regexp-list~ が有効な場合は使わない。regexp expander は入力が伸びたときに
 候補集合が必ず狭くなるとは限らないためである。
 
+~nucleo-completion-sort-ties-by-length~ または
+~nucleo-completion-sort-ties-alphabetically~ が有効な場合、対応する Rust module が
+利用可能なら tie sorting も module 内で行う。score 降順の後に、設定に応じて length
+昇順、alphabetical 昇順、最後に元の index 昇順で安定した順序にする。古い module
+では互換性のため Emacs Lisp 側の scored list sort に fallback する。
+
 * GitHub Actions
 
 ~.github/workflows/prebuilt-modules.yml~ は次のイベントで実行する。
