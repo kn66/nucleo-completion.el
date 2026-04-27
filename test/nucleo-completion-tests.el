@@ -286,6 +286,63 @@
         (should (memq 'nucleo-completion-low-score-face
                       (ensure-list (get-text-property 0 'face (cadr all)))))))))
 
+(ert-deftest nucleo-completion-cache-reuses-narrowed-candidates-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-use-cache t)
+        (nucleo-completion-regexp-functions nil)
+        (table '("foo" "fob" "bar"))
+        (pred (lambda (_) t))
+        (all-completions-count 0)
+        second-module-candidates)
+    (nucleo-completion--clear-cache)
+    (cl-letf* ((original-all-completions (symbol-function 'all-completions))
+               ((symbol-function 'all-completions)
+                (lambda (string table pred &optional hide-spaces)
+                  (setq all-completions-count (1+ all-completions-count))
+                  (funcall original-all-completions
+                           string table pred hide-spaces)))
+               ((symbol-function 'nucleo-completion-filter)
+                (lambda (needle candidates _ignore-case)
+                  (when (string= needle "fo")
+                    (setq second-module-candidates candidates))
+                  (cl-remove-if-not
+                   (lambda (candidate)
+                     (string-prefix-p needle candidate))
+                   candidates))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions "f" table pred))
+                     '("foo" "fob")))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions "fo" table pred))
+                     '("foo" "fob")))
+      (should (= all-completions-count 1))
+      (should (equal second-module-candidates '("foo" "fob"))))))
+
+(ert-deftest nucleo-completion-cache-disabled-for-regexp-functions-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-use-cache t)
+        (nucleo-completion-regexp-functions
+         (list (lambda (_term) nil)))
+        (table '("foo" "fob" "bar"))
+        (pred (lambda (_) t))
+        (all-completions-count 0))
+    (nucleo-completion--clear-cache)
+    (cl-letf* ((original-all-completions (symbol-function 'all-completions))
+               ((symbol-function 'all-completions)
+                (lambda (string table pred &optional hide-spaces)
+                  (setq all-completions-count (1+ all-completions-count))
+                  (funcall original-all-completions
+                           string table pred hide-spaces)))
+               ((symbol-function 'nucleo-completion-filter)
+                (lambda (needle candidates _ignore-case)
+                  (cl-remove-if-not
+                   (lambda (candidate)
+                     (string-prefix-p needle candidate))
+                   candidates))))
+      (nucleo-completion-all-completions "f" table pred)
+      (nucleo-completion-all-completions "fo" table pred)
+      (should (= all-completions-count 2)))))
+
 (ert-deftest nucleo-completion-regexp-only-match-not-score-band-highlighted-test ()
   (let ((completion-ignore-case nil)
         (nucleo-completion-highlight-score-bands t)

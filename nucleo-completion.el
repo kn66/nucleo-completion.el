@@ -68,6 +68,15 @@ the best score use `nucleo-completion-high-score-face'.  Other
 scored candidates use `nucleo-completion-low-score-face'."
   :type 'boolean)
 
+(defcustom nucleo-completion-use-cache t
+  "Whether to reuse the previous narrowed candidate set.
+When non-nil, `nucleo-completion-all-completions' may avoid
+calling `all-completions' on the original completion table when the
+current input extends the previous input in the same completion
+context.  This is disabled automatically when regexp expanders are
+active."
+  :type 'boolean)
+
 (defcustom nucleo-completion-high-score-ratio 0.85
   "Minimum ratio to the best score for high-score candidate highlighting.
 For example, 0.85 means candidates whose score is at least 85% of
@@ -95,6 +104,15 @@ This option only affects high-score candidates when
   :group 'nucleo-completion)
 
 (defvar nucleo-completion--filtering-p nil)
+
+(defvar-local nucleo-completion--current-result nil
+  "Most recent unbased completion result produced during filtering.")
+
+(defvar-local nucleo-completion--current-prefix ""
+  "Prefix corresponding to `nucleo-completion--current-result'.")
+
+(defvar-local nucleo-completion--candidate-cache nil
+  "Cache for reusing narrowed completion candidates in one buffer.")
 
 (defconst nucleo-completion--directory
   (file-name-directory (or load-file-name byte-compile-current-file buffer-file-name))
@@ -398,6 +416,48 @@ Honor IGNORE-CASE."
                        ignore-case))
     (nucleo-completion--scored-filter needle candidates ignore-case)))
 
+(defun nucleo-completion--cache-reusable-p
+    (cache table pred prefix needle ignore-case expanded-regexp-p)
+  "Return non-nil when CACHE can provide candidates for this request."
+  (and nucleo-completion-use-cache
+       cache
+       (not expanded-regexp-p)
+       (null nucleo-completion-regexp-functions)
+       (null completion-regexp-list)
+       (eq table (plist-get cache :table))
+       (eq pred (plist-get cache :pred))
+       (equal prefix (plist-get cache :prefix))
+       (eq ignore-case (plist-get cache :ignore-case))
+       (string-prefix-p (plist-get cache :needle) needle)
+       (not (string= (plist-get cache :needle) ""))))
+
+(defun nucleo-completion--cache-candidates
+    (table pred prefix needle ignore-case all)
+  "Remember ALL candidates for this completion context."
+  (when (and nucleo-completion-use-cache
+             (null nucleo-completion-regexp-functions)
+             (null completion-regexp-list)
+             (not (string= needle "")))
+    (setq nucleo-completion--candidate-cache
+          (list :table table
+                :pred pred
+                :prefix prefix
+                :needle needle
+                :ignore-case ignore-case
+                :all (copy-sequence all)))))
+
+(defun nucleo-completion--cached-candidates
+    (table pred prefix needle ignore-case expanded-regexp-p)
+  "Return cached candidates suitable for filtering NEEDLE, or nil."
+  (when (nucleo-completion--cache-reusable-p
+         nucleo-completion--candidate-cache table pred prefix needle
+         ignore-case expanded-regexp-p)
+    (copy-sequence (plist-get nucleo-completion--candidate-cache :all))))
+
+(defun nucleo-completion--clear-cache ()
+  "Clear the narrowed candidate cache."
+  (setq nucleo-completion--candidate-cache nil))
+
 (defun nucleo-completion--exact-word-match-p (needle candidate)
   "Return non-nil when every NEEDLE term occurs as a word in CANDIDATE."
   (let ((case-fold-search completion-ignore-case))
@@ -482,7 +542,7 @@ SCORE is compared to MAX-SCORE when both are non-nil."
   (nucleo-completion-highlight needle haystack))
 
 ;;;###autoload
-(defun nucleo-completion-all-completions (string table &optional pred point)
+(defun nucleo-completion--all-completions-1 (string table &optional pred point)
   "Get Nucleo completions of STRING in TABLE.
 See `completion-all-completions' for the semantics of PRED and POINT."
   (let* ((beforepoint (substring string 0 point))
@@ -498,14 +558,23 @@ See `completion-all-completions' for the semantics of PRED and POINT."
             (append
              (apply #'append (nucleo-completion--term-regexp-groups needle))
              completion-regexp-list)))
-         (all (if (and (string= prefix "") (stringp (car-safe table))
-                       (not (or pred completion-regexp-list (string= needle ""))))
-                  table
-                (all-completions prefix table pred)))
+         (cached-all
+          (nucleo-completion--cached-candidates
+           table pred prefix needle completion-ignore-case expanded-regexp-p))
+         (all (or cached-all
+                  (if (and (string= prefix "") (stringp (car-safe table))
+                           (not (or pred completion-regexp-list
+                                    (string= needle ""))))
+                      table
+                    (all-completions prefix table pred))))
          scored
          visual-scored
          score-table
          max-score)
+    (setq nucleo-completion--current-prefix prefix
+          nucleo-completion--current-result nil)
+    (when all
+      (setq nucleo-completion--current-result (copy-sequence all)))
     (cond
      ((or (null all) (string= needle "")))
      ((and module-p expanded-regexp-p)
@@ -536,10 +605,14 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                    needle all completion-ignore-case))))
      (t
       (setq all (nucleo-completion--fallback-filter needle all))))
+    (when (and all (not expanded-regexp-p))
+      (nucleo-completion--cache-candidates
+       table pred prefix needle completion-ignore-case all))
     (when visual-scored
       (setq max-score (cdar visual-scored)
             score-table (nucleo-completion--score-table visual-scored)))
     (setq nucleo-completion--filtering-p (not (string= needle "")))
+    (setq nucleo-completion--current-result (copy-sequence all))
     (defvar completion-lazy-hilit-fn)
     (if (bound-and-true-p completion-lazy-hilit)
         (setq completion-lazy-hilit-fn
@@ -555,6 +628,22 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                do (setf x (nucleo-completion--highlight-candidate
                             needle (copy-sequence x) score max-score))))
     (and all (if (string= prefix "") all (nconc all (length prefix))))))
+
+;;;###autoload
+(defun nucleo-completion-all-completions (string table &optional pred point)
+  "Get Nucleo completions of STRING in TABLE.
+Wrap filtering with `while-no-input' so interactive typing can
+interrupt expensive scoring."
+  (pcase (while-no-input
+           (nucleo-completion--all-completions-1 string table pred point))
+    ('nil nil)
+    ('t
+     (when (consp nucleo-completion--current-result)
+       (let ((result (copy-sequence nucleo-completion--current-result)))
+         (if (string= nucleo-completion--current-prefix "")
+             result
+           (nconc result (length nucleo-completion--current-prefix))))))
+    (result result)))
 
 ;;;###autoload
 (defun nucleo-completion-adjust-metadata (metadata)

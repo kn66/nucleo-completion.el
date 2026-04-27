@@ -114,11 +114,28 @@ Emacs must be built with dynamic module support. You can check this with
 Behavior and verification details are maintained in
 ~spec/nucleo-completion.org~.
 
+* Performance
+
+The Rust module scores large candidate sets in worker threads using fixed-size
+batches that idle workers pull dynamically.  On the Emacs side, filtering is
+wrapped in ~while-no-input~ so new keystrokes can interrupt an older,
+still-running filter pass.
+
+~nucleo-completion-use-cache~ is enabled by default.  During one completion
+session, when the current query extends the previous query in the same
+~table~/~pred~/prefix context, ~nucleo-completion~ reuses the previously
+narrowed candidates instead of asking the original completion table for the full
+candidate set again.
+
+The cache is intentionally conservative and is skipped when
+~nucleo-completion-regexp-functions~ or an existing ~completion-regexp-list~ is
+active, since custom regexp expanders may not be monotonic as the query grows.
+
 * Acknowledgements
 
-This package was inspired in part by ~hotfuzz~. Its performance is excellent,
-and I am grateful to the author for creating and sharing such a fast Emacs
-fuzzy matching package.
+This package was inspired in part by ~hotfuzz~, ~fussy~, and ~fzf-native~.
+Their native scoring, threading, and interactive completion strategies informed
+the performance work here.
 
 * Tie Sorting
 

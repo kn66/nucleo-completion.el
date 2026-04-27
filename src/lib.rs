@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use emacs::{defun, Env, IntoLisp, Result, Value};
@@ -20,6 +21,8 @@ struct ScoredIndex {
     index: usize,
     score: u32,
 }
+
+const PARALLEL_BATCH_SIZE: usize = 2048;
 
 fn case_matching(ignore_case: bool) -> CaseMatching {
     if ignore_case {
@@ -54,19 +57,16 @@ fn collect_candidates<'e>(candidates: Value<'e>) -> Result<(Vec<Value<'e>>, Vec<
 }
 
 fn score_items(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
-    const PARALLEL_THRESHOLD: usize = 2048;
-
-    if texts.len() < PARALLEL_THRESHOLD {
+    if texts.len() < PARALLEL_BATCH_SIZE {
         return sort_scored(with_matcher(|matcher| {
             score_item_range(pattern, texts, 0, matcher)
         }));
     }
 
-    let workers = thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(texts.len().div_ceil(PARALLEL_THRESHOLD))
-        .max(1);
+    let workers = parallel_worker_count(
+        texts.len(),
+        thread::available_parallelism().map(usize::from).unwrap_or(1),
+    );
 
     if workers == 1 {
         return sort_scored(with_matcher(|matcher| {
@@ -74,14 +74,31 @@ fn score_items(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
         }));
     }
 
-    let chunk_size = texts.len().div_ceil(workers);
+    let batch_count = texts.len().div_ceil(PARALLEL_BATCH_SIZE);
+    let next_batch = AtomicUsize::new(0);
     let scored = thread::scope(|scope| {
         let mut handles = Vec::with_capacity(workers);
-        for (chunk_index, chunk) in texts.chunks(chunk_size).enumerate() {
-            let offset = chunk_index * chunk_size;
+        for _ in 0..workers {
+            let next_batch = &next_batch;
             handles.push(scope.spawn(move || {
                 let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-                score_item_range(pattern, chunk, offset, &mut matcher)
+                let mut scored = Vec::new();
+                loop {
+                    let batch_index = next_batch.fetch_add(1, Ordering::Relaxed);
+                    if batch_index >= batch_count {
+                        break;
+                    }
+
+                    let start = batch_index * PARALLEL_BATCH_SIZE;
+                    let end = (start + PARALLEL_BATCH_SIZE).min(texts.len());
+                    scored.extend(score_item_range(
+                        pattern,
+                        &texts[start..end],
+                        start,
+                        &mut matcher,
+                    ));
+                }
+                scored
             }));
         }
 
@@ -93,6 +110,11 @@ fn score_items(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
     });
 
     sort_scored(scored)
+}
+
+fn parallel_worker_count(item_count: usize, available_parallelism: usize) -> usize {
+    let batches = item_count.div_ceil(PARALLEL_BATCH_SIZE).max(1);
+    available_parallelism.max(1).min(batches)
 }
 
 fn sort_scored(mut scored: Vec<ScoredIndex>) -> Vec<ScoredIndex> {
@@ -183,4 +205,22 @@ fn scored_filter<'e>(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_worker_count_caps_to_batches() {
+        assert_eq!(parallel_worker_count(PARALLEL_BATCH_SIZE, 8), 1);
+        assert_eq!(parallel_worker_count(PARALLEL_BATCH_SIZE + 1, 8), 2);
+        assert_eq!(parallel_worker_count(PARALLEL_BATCH_SIZE * 3, 8), 3);
+    }
+
+    #[test]
+    fn parallel_worker_count_caps_to_available_parallelism() {
+        assert_eq!(parallel_worker_count(PARALLEL_BATCH_SIZE * 8, 2), 2);
+        assert_eq!(parallel_worker_count(PARALLEL_BATCH_SIZE * 8, 0), 1);
+    }
 }

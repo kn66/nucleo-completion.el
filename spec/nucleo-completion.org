@@ -150,10 +150,25 @@ Prebuilt module は ~bin/<target-triple>/~ に配置する。
 Rust dynamic module は Emacs から受け取った候補を一度 Rust 文字列へ変換し、
 候補数が多い場合は ~nucleo-matcher~ scoring を worker thread に分配する。
 Emacs の value は worker thread へ渡さず、score 計算後に main thread で
-completion list を再構築する。
+completion list を再構築する。worker thread は固定 size の batch を atomic counter
+経由で取得するため、候補文字列の長さや scoring cost が偏っても worker 間の負荷が
+偏りにくい。
 
 ~nucleo-matcher~ の ~Matcher~ は scratch memory を持つため、single-thread 経路では
 thread-local に再利用し、parallel worker では worker ごとに作成する。
+
+Emacs 側の completion entry point は ~while-no-input~ で filtering を包み、
+入力が到着した場合は直近の結果を返せる場合だけ返す。これにより CAPF や
+company/corfu の typing latency で古い filter pass が UI を長く塞がないようにする。
+
+~nucleo-completion-use-cache~ が non-nil の場合、同じ ~table~ / ~pred~ / prefix /
+~completion-ignore-case~ の completion context で needle が前回 needle を prefix として
+伸びているとき、前回の narrowed candidates を次回の入力候補として再利用する。
+これにより補完テーブル全体の再列挙を避け、Rust module への入力数も減らす。
+
+この cache は ~nucleo-completion-regexp-functions~ または既存の
+~completion-regexp-list~ が有効な場合は使わない。regexp expander は入力が伸びたときに
+候補集合が必ず狭くなるとは限らないためである。
 
 * GitHub Actions
 
