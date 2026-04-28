@@ -63,18 +63,6 @@ fn collect_candidates<'e>(candidates: Value<'e>) -> Result<(Vec<Value<'e>>, Vec<
     Ok((values, texts))
 }
 
-fn score_items(pattern: &Pattern, texts: &[String]) -> Vec<ScoredIndex> {
-    score_items_with_sort(
-        pattern,
-        texts,
-        SortOptions {
-            ties_by_length: false,
-            ties_alphabetically: false,
-            ignore_case: false,
-        },
-    )
-}
-
 fn score_items_with_sort(
     pattern: &Pattern,
     texts: &[String],
@@ -207,61 +195,43 @@ fn score_item_range(
         .collect()
 }
 
-#[defun]
-fn filter<'e>(
-    env: &'e Env,
-    pattern: String,
-    candidates: Value<'e>,
-    ignore_case: Value<'e>,
-) -> Result<Value<'e>> {
-    let (values, texts) = collect_candidates(candidates)?;
-    let pattern = Pattern::parse(
-        &pattern,
-        case_matching(ignore_case.is_not_nil()),
-        Normalization::Smart,
-    );
-    let matches = score_items(&pattern, &texts);
+fn matched_indices(pattern: &Pattern, text: &str, matcher: &mut Matcher) -> Option<Vec<u32>> {
+    let mut buf = Vec::new();
+    let mut indices = Vec::new();
+    pattern.indices(Utf32Str::new(text, &mut buf), matcher, &mut indices)?;
+    indices.sort_unstable();
+    indices.dedup();
+    Some(indices)
+}
 
+fn indices_to_lisp<'e>(env: &'e Env, indices: Vec<u32>) -> Result<Value<'e>> {
     let mut result = env.intern("nil")?;
-    for scored in matches.into_iter().rev() {
-        result = env.cons(values[scored.index], result)?;
+    for index in indices.into_iter().rev() {
+        result = env.cons(index.into_lisp(env)?, result)?;
     }
-
     Ok(result)
 }
 
-#[defun]
-fn scored_filter<'e>(
+fn result_entry_to_lisp<'e>(
     env: &'e Env,
-    pattern: String,
-    candidates: Value<'e>,
-    ignore_case: Value<'e>,
+    candidate: Value<'e>,
+    score: u32,
+    indices: Value<'e>,
 ) -> Result<Value<'e>> {
-    let (values, texts) = collect_candidates(candidates)?;
-    let pattern = Pattern::parse(
-        &pattern,
-        case_matching(ignore_case.is_not_nil()),
-        Normalization::Smart,
-    );
-    let matches = score_items(&pattern, &texts);
-
-    let mut result = env.intern("nil")?;
-    for scored in matches.into_iter().rev() {
-        let pair = env.cons(values[scored.index], scored.score.into_lisp(env)?)?;
-        result = env.cons(pair, result)?;
-    }
-
-    Ok(result)
+    let nil = env.intern("nil")?;
+    let tail = env.cons(score.into_lisp(env)?, env.cons(indices, nil)?)?;
+    env.cons(candidate, tail)
 }
 
 #[defun]
-fn sorted_filter<'e>(
+fn candidates<'e>(
     env: &'e Env,
     pattern: String,
     candidates: Value<'e>,
     ignore_case: Value<'e>,
     sort_ties_by_length: Value<'e>,
     sort_ties_alphabetically: Value<'e>,
+    highlight_limit: Value<'e>,
 ) -> Result<Value<'e>> {
     let (values, texts) = collect_candidates(candidates)?;
     let ignore_case = ignore_case.is_not_nil();
@@ -275,41 +245,22 @@ fn sorted_filter<'e>(
             ignore_case,
         },
     );
+    let highlight_limit = highlight_limit.into_rust::<usize>()?;
 
     let mut result = env.intern("nil")?;
-    for scored in matches.into_iter().rev() {
-        result = env.cons(values[scored.index], result)?;
-    }
-
-    Ok(result)
-}
-
-#[defun]
-fn sorted_scored_filter<'e>(
-    env: &'e Env,
-    pattern: String,
-    candidates: Value<'e>,
-    ignore_case: Value<'e>,
-    sort_ties_by_length: Value<'e>,
-    sort_ties_alphabetically: Value<'e>,
-) -> Result<Value<'e>> {
-    let (values, texts) = collect_candidates(candidates)?;
-    let ignore_case = ignore_case.is_not_nil();
-    let pattern = Pattern::parse(&pattern, case_matching(ignore_case), Normalization::Smart);
-    let matches = score_items_with_sort(
-        &pattern,
-        &texts,
-        SortOptions {
-            ties_by_length: sort_ties_by_length.is_not_nil(),
-            ties_alphabetically: sort_ties_alphabetically.is_not_nil(),
-            ignore_case,
-        },
-    );
-
-    let mut result = env.intern("nil")?;
-    for scored in matches.into_iter().rev() {
-        let pair = env.cons(values[scored.index], scored.score.into_lisp(env)?)?;
-        result = env.cons(pair, result)?;
+    for (rank, scored) in matches.into_iter().enumerate().rev() {
+        let indices = if rank < highlight_limit {
+            match with_matcher(|matcher| matched_indices(&pattern, &texts[scored.index], matcher)) {
+                Some(indices) => indices_to_lisp(env, indices)?,
+                None => env.intern("nil")?,
+            }
+        } else {
+            env.intern("nil")?
+        };
+        result = env.cons(
+            result_entry_to_lisp(env, values[scored.index], scored.score, indices)?,
+            result,
+        )?;
     }
 
     Ok(result)
@@ -442,5 +393,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 3, 0, 2]
         );
+    }
+
+    #[test]
+    fn matched_indices_returns_sorted_unique_positions() {
+        let pattern = Pattern::parse("foo", CaseMatching::Respect, Normalization::Smart);
+        let indices = with_matcher(|matcher| matched_indices(&pattern, "xfoox", matcher));
+
+        assert_eq!(indices, Some(vec![1, 2, 3]));
     }
 }

@@ -56,17 +56,11 @@ Expected prebuilt layout:
     bin/
       x86_64-unknown-linux-gnu/
         libnucleo_completion_module.so
-      x86_64-unknown-linux-musl/
-        libnucleo_completion_module.so
-      aarch64-unknown-linux-gnu/
-        libnucleo_completion_module.so
       x86_64-apple-darwin/
         libnucleo_completion_module.dylib
       aarch64-apple-darwin/
         libnucleo_completion_module.dylib
       x86_64-pc-windows-msvc/
-        nucleo_completion_module.dll
-      x86_64-pc-windows-gnu/
         nucleo_completion_module.dll
 #+end_src
 
@@ -75,6 +69,11 @@ Check whether the Rust module loaded with:
 #+begin_src emacs-lisp
   (featurep 'nucleo-completion-module)
 #+end_src
+
+If a readable module is found but cannot be loaded, the failure details are
+saved in ~nucleo-completion-module-load-errors~.  Set
+~nucleo-completion-report-module-load-errors~ before loading the package to also
+show those failures in ~*Messages*~.
 
 If the module is unavailable, the package still filters candidates with a simple
 Emacs Lisp subsequence matcher, but Rust-backed scoring is not applied.
@@ -105,6 +104,9 @@ directory back to ~main~ when there are changes.
 Linux binaries are sensitive to libc compatibility. For broad Linux
 distribution, consider adding a musl build and placing it under
 ~bin/x86_64-unknown-linux-musl/~.
+The loader also checks likely platform directories such as musl Linux,
+aarch64 Linux, and Windows GNU targets, but the workflow above only publishes
+the targets listed here unless the matrix is extended.
 
 Emacs must be built with dynamic module support. You can check this with
 ~(functionp 'module-load)~.
@@ -119,24 +121,26 @@ Behavior and verification details are maintained in
 The Rust module scores large candidate sets in worker threads using fixed-size
 batches that idle workers pull dynamically.  On the Emacs side, filtering is
 wrapped in ~while-no-input~ so new keystrokes can interrupt an older,
-still-running filter pass.
+still-running filter pass while control is in Emacs Lisp.  The Rust module call
+itself is synchronous, so a very large candidate set can still occupy Emacs
+until that module call returns.
 
-~nucleo-completion-use-cache~ is enabled by default.  During one completion
-session, when the current query extends the previous query in the same
-~table~/~pred~/prefix context, ~nucleo-completion~ reuses the previously
-narrowed candidates instead of asking the original completion table for the full
-candidate set again.
+Regexp expanders configured with ~nucleo-completion-regexp-functions~ are cached
+for the duration of each completion pass.  This avoids repeatedly invoking slow
+expanders while deciding whether expansion is needed, filtering candidates, and
+highlighting matches.
 
-The cache is intentionally conservative and is skipped when
-~nucleo-completion-regexp-functions~ or an existing ~completion-regexp-list~ is
-active, since custom regexp expanders may not be monotonic as the query grows.
+The Rust module returns each candidate together with its score and the match
+indices chosen by ~nucleo-matcher~ for the top highlighted candidates, so the
+highlighted characters track the same match that produced the score without an
+extra module call per candidate.  If the module is unavailable, the package
+falls back to the simple Emacs Lisp subsequence highlighter.
 
 Tie sorting with ~nucleo-completion-sort-ties-by-length~ and
 ~nucleo-completion-sort-ties-alphabetically~ is handled by the Rust module.
-Older modules without the batch sorting API are ignored and the package uses the
-simple Emacs Lisp fallback filter instead.  The fallback only narrows
-candidates; it preserves input order and does not compute scores, apply tie
-sorting, or add score-band highlighting.
+If the module is unavailable, the package uses the simple Emacs Lisp fallback
+filter instead.  The fallback only narrows candidates; it preserves input order
+and does not compute scores, apply tie sorting, or add score-band highlighting.
 
 * Acknowledgements
 
@@ -181,6 +185,9 @@ high-score candidates regardless of the ratio.  Other scored candidates use
 ~nucleo-completion-high-score-face~ and ~nucleo-completion-low-score-face~ to
 change the visual style.  The default faces avoid background colors so they do
 not conflict with completion UI selection highlights or color themes.
+At runtime, invalid highlight counts are treated as 0 and score ratios are
+clamped to the 0.0 to 1.0 range, so accidental bad values do not break
+completion filtering.
 
 * History Sorting
 
