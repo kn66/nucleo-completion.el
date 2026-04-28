@@ -278,6 +278,8 @@ commands use ~extended-command-history~, while file completions commonly use
 ~nucleo-completion-regexp-functions~ can add language-specific matchers such as
 Migemo. Each function receives one whitespace-separated search term and returns
 a regexp string, a list of regexp strings, or nil.
+Regexp expander results are cached for each completion pass, so user
+configuration normally does not need its own per-term cache.
 
 Migemo example:
 
@@ -296,45 +298,7 @@ Migemo example:
                  #'my-nucleo-completion-migemo-regexp))
 #+end_src
 
-If Migemo regexp expansion is slow in large completion sets, cache the generated
-regexp for each term. The following example also caches nil results for invalid
-regexps and clears the cache after it grows past 1024 entries:
-
-#+begin_src emacs-lisp
-  (with-eval-after-load 'migemo
-    (defvar my-nucleo-completion-migemo-regexp-cache
-      (make-hash-table :test #'equal))
-
-    (defun my-nucleo-completion-clear-migemo-regexp-cache ()
-      (clrhash my-nucleo-completion-migemo-regexp-cache))
-
-    (defun my-nucleo-completion-migemo-regexp (term)
-      (when (not (string-empty-p term))
-        (let ((cached (gethash term
-                               my-nucleo-completion-migemo-regexp-cache
-                               :my-nucleo-cache-miss)))
-          (if (not (eq cached :my-nucleo-cache-miss))
-              cached
-            (when (> (hash-table-count
-                      my-nucleo-completion-migemo-regexp-cache)
-                     1024)
-              (my-nucleo-completion-clear-migemo-regexp-cache))
-            (let* ((regexp (downcase (migemo-get-pattern term)))
-                   (result
-                    (condition-case nil
-                        (progn
-                          (string-match-p regexp "")
-                          regexp)
-                      (invalid-regexp nil))))
-              (puthash term result
-                       my-nucleo-completion-migemo-regexp-cache)
-              result)))))
-
-    (add-to-list 'nucleo-completion-regexp-functions
-                 #'my-nucleo-completion-migemo-regexp))
-#+end_src
-
-Complete ~use-package~ example with cached Migemo and Corfu:
+Complete ~use-package~ example with Migemo and Corfu:
 
 #+begin_src emacs-lisp
   (use-package nucleo-completion
@@ -344,33 +308,14 @@ Complete ~use-package~ example with cached Migemo and Corfu:
     (setopt completion-styles '(nucleo basic))
 
     (with-eval-after-load 'migemo
-      (defvar my-nucleo-completion-migemo-regexp-cache
-        (make-hash-table :test #'equal))
-
-      (defun my-nucleo-completion-clear-migemo-regexp-cache ()
-        (clrhash my-nucleo-completion-migemo-regexp-cache))
-
       (defun my-nucleo-completion-migemo-regexp (term)
         (when (not (string-empty-p term))
-          (let ((cached (gethash term
-                                 my-nucleo-completion-migemo-regexp-cache
-                                 :my-nucleo-cache-miss)))
-            (if (not (eq cached :my-nucleo-cache-miss))
-                cached
-              (when (> (hash-table-count
-                        my-nucleo-completion-migemo-regexp-cache)
-                       1024)
-                (my-nucleo-completion-clear-migemo-regexp-cache))
-              (let* ((regexp (downcase (migemo-get-pattern term)))
-                     (result
-                      (condition-case nil
-                          (progn
-                            (string-match-p regexp "")
-                            regexp)
-                        (invalid-regexp nil))))
-                (puthash term result
-                         my-nucleo-completion-migemo-regexp-cache)
-                result)))))
+          (let ((regexp (downcase (migemo-get-pattern term))))
+            (condition-case nil
+                (progn
+                  (string-match-p regexp "")
+                  regexp)
+              (invalid-regexp nil)))))
 
       (add-to-list 'nucleo-completion-regexp-functions
                    #'my-nucleo-completion-migemo-regexp))
