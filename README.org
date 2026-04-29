@@ -128,7 +128,15 @@ until that module call returns.
 Regexp expanders configured with ~nucleo-completion-regexp-functions~ are cached
 for the duration of each completion pass.  This avoids repeatedly invoking slow
 expanders while deciding whether expansion is needed, filtering candidates, and
-highlighting matches.
+highlighting matches.  When the Rust module is available, Nucleo fuzzy matching
+runs before the Elisp regexp filter, and regexp matching is only applied to
+candidates that were not already accepted by the module.
+
+For expensive expanders that return stable results, such as a simple
+~migemo-get-pattern~ wrapper, ~nucleo-completion-persistent-regexp-cache-size~
+can cache expander results across completion passes.  Keep it disabled when an
+expander depends on mutable state that is not represented by the term, function
+list, ~completion-ignore-case~, or ~default-directory~.
 
 The Rust module returns each candidate together with its score and the match
 indices chosen by ~nucleo-matcher~ for the top highlighted candidates, so the
@@ -281,6 +289,20 @@ a regexp string, a list of regexp strings, or nil.
 Regexp expander results are cached for each completion pass, so user
 configuration normally does not need its own per-term cache.
 
+If an expander is still expensive across repeated completion passes, enable the
+bounded persistent cache:
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-persistent-regexp-cache-size 1024)
+#+end_src
+
+This cache is opt-in because generic regexp expanders can depend on external
+state.  Clear it manually after changing dictionaries or expander settings:
+
+#+begin_src emacs-lisp
+  (nucleo-completion-clear-persistent-regexp-cache)
+#+end_src
+
 Migemo example:
 
 #+begin_src emacs-lisp
@@ -308,6 +330,8 @@ Complete ~use-package~ example with Migemo and Corfu:
     (setopt completion-styles '(nucleo basic))
 
     (with-eval-after-load 'migemo
+      (setq nucleo-completion-persistent-regexp-cache-size 1024)
+
       (defun my-nucleo-completion-migemo-regexp (term)
         (when (not (string-empty-p term))
           (let ((regexp (downcase (migemo-get-pattern term))))

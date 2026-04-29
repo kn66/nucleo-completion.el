@@ -49,6 +49,17 @@ ANDed together."
   :type '(repeat function)
   :group 'nucleo-completion)
 
+(defcustom nucleo-completion-persistent-regexp-cache-size nil
+  "Maximum number of regexp expander results cached across completion passes.
+When nil, regexp expander results are only cached for one
+completion pass.  When set to a positive integer, results are
+also cached across completion passes.  Set this only when your
+regexp functions return stable results for the same term,
+function list, `completion-ignore-case', and `default-directory'."
+  :type '(choice (const :tag "Disable persistent cache" nil)
+                 (natnum :tag "Maximum cached entries"))
+  :group 'nucleo-completion)
+
 (defcustom nucleo-completion-sort-ties-by-length nil
   "Whether to sort equal-scoring Nucleo matches by candidate length.
 When non-nil, shorter candidates come first.  This only affects
@@ -121,6 +132,9 @@ Each entry has the form (FILE . MESSAGE).")
 
 (defvar nucleo-completion--regexp-cache nil
   "Cache for regexp expander results during one completion pass.")
+
+(defvar nucleo-completion--persistent-regexp-cache (make-hash-table :test #'equal)
+  "Cache for regexp expander results across completion passes.")
 
 (defconst nucleo-completion--directory
   (file-name-directory (or load-file-name byte-compile-current-file buffer-file-name))
@@ -264,6 +278,47 @@ Each entry has the form (FILE . MESSAGE).")
     (nucleo-completion--regexp-function-regexps-1 term)))
 
 (defun nucleo-completion--regexp-function-regexps-1 (term)
+  "Return persistent-cached extra regexps produced for TERM."
+  (let ((limit (nucleo-completion--persistent-regexp-cache-limit)))
+    (if limit
+        (let* ((key (nucleo-completion--persistent-regexp-cache-key term))
+               (cached (gethash key
+                                nucleo-completion--persistent-regexp-cache
+                                :missing)))
+          (if (not (eq cached :missing))
+              cached
+            (let ((regexps
+                   (nucleo-completion--regexp-function-regexps-uncached term)))
+              (when (> limit 0)
+                (when (>= (hash-table-count
+                           nucleo-completion--persistent-regexp-cache)
+                          limit)
+                  (nucleo-completion-clear-persistent-regexp-cache))
+                (puthash key regexps
+                         nucleo-completion--persistent-regexp-cache))
+              regexps)))
+      (nucleo-completion--regexp-function-regexps-uncached term))))
+
+(defun nucleo-completion--persistent-regexp-cache-limit ()
+  "Return sanitized persistent regexp cache size, or nil when disabled."
+  (when (and (integerp nucleo-completion-persistent-regexp-cache-size)
+             (> nucleo-completion-persistent-regexp-cache-size 0))
+    nucleo-completion-persistent-regexp-cache-size))
+
+(defun nucleo-completion--persistent-regexp-cache-key (term)
+  "Return persistent regexp cache key for TERM."
+  (list term
+        nucleo-completion-regexp-functions
+        completion-ignore-case
+        default-directory))
+
+;;;###autoload
+(defun nucleo-completion-clear-persistent-regexp-cache ()
+  "Clear cached regexp expander results."
+  (interactive)
+  (clrhash nucleo-completion--persistent-regexp-cache))
+
+(defun nucleo-completion--regexp-function-regexps-uncached (term)
   "Return uncached extra regexps produced for TERM."
   (cl-loop for function in nucleo-completion-regexp-functions
            for value = (when (functionp function)
@@ -310,6 +365,18 @@ least one regexp from every group."
   (let ((case-fold-search completion-ignore-case)
         (regexp-groups (nucleo-completion--term-regexp-groups needle)))
     (cl-loop for candidate in candidates
+             when (nucleo-completion--regexp-match-p regexp-groups candidate)
+             collect (cons candidate nil))))
+
+(defun nucleo-completion--regexp-filter-pairs-excluding
+    (needle candidates excluded)
+  "Return CANDIDATES matching NEEDLE and absent from EXCLUDED.
+EXCLUDED is a hash table keyed by `nucleo-completion--string-key'."
+  (let ((case-fold-search completion-ignore-case)
+        (regexp-groups (nucleo-completion--term-regexp-groups needle)))
+    (cl-loop for candidate in candidates
+             unless (gethash (nucleo-completion--string-key candidate)
+                             excluded)
              when (nucleo-completion--regexp-match-p regexp-groups candidate)
              collect (cons candidate nil))))
 
@@ -366,7 +433,7 @@ HIGHLIGHT-LIMIT top-ranking candidates."
           results))
 
 (defun nucleo-completion--results->indices-table (results)
-  "Return hash table mapping candidates to precomputed match indices."
+  "Return hash table mapping candidates in RESULTS to precomputed indices."
   (let ((table (make-hash-table :test #'equal)))
     (dolist (result results)
       (when (nucleo-completion--result-indices result)
@@ -376,19 +443,31 @@ HIGHLIGHT-LIMIT top-ranking candidates."
                  table)))
     table))
 
+(defun nucleo-completion--results->candidate-table (results)
+  "Return hash table containing candidates from RESULTS."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (result results)
+      (puthash (nucleo-completion--string-key
+                (nucleo-completion--result-candidate result))
+               t table))
+    table))
+
 (defun nucleo-completion--merge-regexp-results (regexp-pairs module-results)
   "Merge REGEXP-PAIRS with MODULE-RESULTS.
 Regexp-only candidates are promoted before module-scored results."
   (let ((seen (make-hash-table :test #'equal))
         regexp-results)
     (dolist (result module-results)
-      (puthash (nucleo-completion--result-candidate result) t seen))
+      (puthash (nucleo-completion--string-key
+                (nucleo-completion--result-candidate result))
+               t seen))
     (setq regexp-results
           (cl-loop with score = (or (nucleo-completion--result-score
                                      (car module-results))
                                     1)
                    for entry in regexp-pairs
-                   unless (gethash (car entry) seen)
+                   unless (gethash (nucleo-completion--string-key (car entry))
+                                   seen)
                    collect (list (car entry) score nil)))
     (append regexp-results module-results)))
 
@@ -459,7 +538,9 @@ SCORE is compared to MAX-SCORE."
         (setq start (if (< beg end) end (1+ start)))))))
 
 (defun nucleo-completion-highlight (needle haystack &optional indices)
-  "Highlight destructively the NEEDLE matches in HAYSTACK."
+  "Highlight destructively the NEEDLE matches in HAYSTACK.
+When INDICES is non-nil, highlight those precomputed match
+positions instead of recomputing a subsequence match."
   (let ((case-fold-search completion-ignore-case))
     (if indices
         (dolist (index indices)
@@ -522,16 +603,17 @@ See `completion-all-completions' for the semantics of PRED and POINT."
       (cond
        ((or (null all) (string= needle "")))
        ((and module-p expanded-regexp-p)
+        (setq module-results
+              (nucleo-completion--module-results
+               needle all completion-ignore-case highlight-limit))
         (let ((regexp-pairs
-               (nucleo-completion--regexp-filter-pairs needle all)))
+               (nucleo-completion--regexp-filter-pairs-excluding
+                needle all
+                (nucleo-completion--results->candidate-table
+                 module-results))))
           (setq module-results
-                (nucleo-completion--merge-regexp-results
-                 regexp-pairs
-                 (nucleo-completion--module-results
-                  needle
-                  (mapcar #'car regexp-pairs)
-                  completion-ignore-case
-                  highlight-limit))
+                (nucleo-completion--merge-regexp-results regexp-pairs
+                                                         module-results)
                 visual-scored (nucleo-completion--results->scored module-results)
                 indices-table (nucleo-completion--results->indices-table
                                module-results)

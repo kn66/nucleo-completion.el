@@ -102,6 +102,7 @@
   (let ((members (get 'nucleo-completion 'custom-group)))
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
+                      nucleo-completion-persistent-regexp-cache-size
                       nucleo-completion-sort-ties-by-length
                       nucleo-completion-sort-ties-alphabetically
                       nucleo-completion-highlight-score-bands
@@ -273,6 +274,58 @@
                      '("日本語" "nihon-go")))
       (should (= nucleo-completion-tests--regexp-calls 1)))))
 
+(ert-deftest nucleo-completion-persistent-regexp-cache-disabled-by-default-test ()
+  (let ((nucleo-completion-tests--regexp-calls 0)
+        (nucleo-completion-persistent-regexp-cache-size nil)
+        (nucleo-completion-regexp-functions
+         (list #'nucleo-completion-tests--nihon-regexp)))
+    (nucleo-completion-clear-persistent-regexp-cache)
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil)))
+      (nucleo-completion-all-completions
+       "nihon" '("日本語" "nihon-go" "英語"))
+      (nucleo-completion-all-completions
+       "nihon" '("日本語" "nihon-go" "英語"))
+      (should (= nucleo-completion-tests--regexp-calls 2)))))
+
+(ert-deftest nucleo-completion-persistent-regexp-cache-test ()
+  (let ((nucleo-completion-tests--regexp-calls 0)
+        (nucleo-completion-persistent-regexp-cache-size 1024)
+        (nucleo-completion-regexp-functions
+         (list #'nucleo-completion-tests--nihon-regexp)))
+    (nucleo-completion-clear-persistent-regexp-cache)
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil)))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "nihon" '("日本語" "nihon-go" "英語")))
+                     '("日本語" "nihon-go")))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "nihon" '("日本語" "nihon-go" "英語")))
+                     '("日本語" "nihon-go")))
+      (should (= nucleo-completion-tests--regexp-calls 1)))))
+
+(ert-deftest nucleo-completion-persistent-regexp-cache-keys-function-list-test ()
+  (let ((nucleo-completion-persistent-regexp-cache-size 1024)
+        (calls-a 0)
+        (calls-b 0))
+    (nucleo-completion-clear-persistent-regexp-cache)
+    (let ((nucleo-completion-regexp-functions
+           (list (lambda (_term)
+                   (setq calls-a (1+ calls-a))
+                   "日本"))))
+      (should (equal (nucleo-completion--regexp-function-regexps "nihon")
+                     '("日本"))))
+    (let ((nucleo-completion-regexp-functions
+           (list (lambda (_term)
+                   (setq calls-b (1+ calls-b))
+                   "語"))))
+      (should (equal (nucleo-completion--regexp-function-regexps "nihon")
+                     '("語"))))
+    (should (= calls-a 1))
+    (should (= calls-b 1))))
+
 (ert-deftest nucleo-completion-regexp-functions-buffer-local-disable-test ()
   (let ((nucleo-completion-regexp-functions
          (list (lambda (term)
@@ -307,9 +360,35 @@
                              (nucleo-completion--module-results
                               "nihon" (mapcar #'car regexp-pairs) nil 0)))
                      (mapcar #'nucleo-completion--result-candidate
-                             (nucleo-completion--merge-regexp-results
-                              regexp-pairs module-results)))
+                              (nucleo-completion--merge-regexp-results
+                               regexp-pairs module-results)))
                      '("日本語" "日本史" "roman-nihon"))))))
+
+(ert-deftest nucleo-completion-module-skips-regexp-filter-for-module-matches-test ()
+  (let ((nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (when (string= term "nihon")
+                   "日本"))))
+        seen)
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit)
+                 (cl-loop for candidate in candidates
+                          when (string-match-p "roman" candidate)
+                          collect (list candidate 128 nil))))
+              ((symbol-function 'nucleo-completion--regexp-match-p)
+               (lambda (regexp-groups candidate)
+                 (push candidate seen)
+                 (cl-every (lambda (regexps)
+                             (cl-some (lambda (regexp)
+                                        (string-match-p regexp candidate))
+                                      regexps))
+                           regexp-groups))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "nihon" '("roman-nihon" "日本語" "miss")))
+                     '("日本語" "roman-nihon")))
+      (should (equal (nreverse seen) '("日本語" "miss"))))))
 
 (ert-deftest nucleo-completion-sort-with-module-scores-regexp-only-matches-test ()
   (let ((nucleo-completion-regexp-functions
