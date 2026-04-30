@@ -187,6 +187,10 @@ Emacs 側の completion entry point は ~while-no-input~ で filtering を包み
 これにより、regexp expansion の必要判定、候補 filtering、highlighting の各段階で
 同じ term の expander を重複実行しない。
 
+検索文字列の term 分割と fuzzy subsequence regexp の構築も completion pass ごとに
+cache する。候補 filtering、score-band 判定、eager/lazy highlight が同じ needle と
+term を繰り返し参照しても、同じ純粋な文字列処理を再実行しない。
+
 Rust module が使える場合、regexp expander が有効でも先に Rust module で fuzzy
 filtering/scoring を行う。module が fuzzy match として返した候補には Emacs Lisp
 側の regexp filtering を再適用せず、module から漏れた候補だけを

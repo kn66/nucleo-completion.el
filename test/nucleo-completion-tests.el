@@ -25,11 +25,22 @@
                  '("foo" "bar" "baz")))
   (should (equal (nucleo-completion--terms "   ") nil)))
 
+(ert-deftest nucleo-completion-terms-cache-test ()
+  (let ((nucleo-completion--terms-cache (make-hash-table :test #'equal)))
+    (should (eq (nucleo-completion--terms "foo bar")
+                (nucleo-completion--terms "foo bar")))))
+
 (ert-deftest nucleo-completion-subsequence-regexp-test ()
   (let ((case-fold-search nil)
         (regexp (concat "\\`" (nucleo-completion--subsequence-regexp "f.b"))))
     (should (string-match-p regexp "foo.bar"))
     (should-not (string-match-p regexp "foo-baz"))))
+
+(ert-deftest nucleo-completion-subsequence-regexp-cache-test ()
+  (let ((nucleo-completion--subsequence-regexp-cache
+         (make-hash-table :test #'equal)))
+    (should (eq (nucleo-completion--subsequence-regexp "fb")
+                (nucleo-completion--subsequence-regexp "fb")))))
 
 (ert-deftest nucleo-completion-platform-triples-test ()
   (let ((system-type 'gnu/linux)

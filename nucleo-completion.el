@@ -163,6 +163,12 @@ Each entry has the form (FILE . MESSAGE).")
 (defvar nucleo-completion--regexp-cache nil
   "Cache for regexp expander results during one completion pass.")
 
+(defvar nucleo-completion--terms-cache nil
+  "Cache for split search terms during one completion pass.")
+
+(defvar nucleo-completion--subsequence-regexp-cache nil
+  "Cache for fuzzy subsequence regexps during one completion pass.")
+
 (defvar nucleo-completion--persistent-regexp-cache (make-hash-table :test #'equal)
   "Cache for regexp expander results across completion passes.")
 
@@ -312,10 +318,29 @@ Each entry has the form (FILE . MESSAGE).")
 
 (defun nucleo-completion--terms (pattern)
   "Split PATTERN into non-empty whitespace-separated terms."
-  (split-string pattern "[[:space:]]+" t))
+  (if (hash-table-p nucleo-completion--terms-cache)
+      (let ((cached (gethash pattern nucleo-completion--terms-cache :missing)))
+        (if (not (eq cached :missing))
+            cached
+          (let ((terms (split-string pattern "[[:space:]]+" t)))
+            (puthash pattern terms nucleo-completion--terms-cache)
+            terms)))
+    (split-string pattern "[[:space:]]+" t)))
 
 (defun nucleo-completion--subsequence-regexp (needle)
   "Return a fuzzy subsequence regexp for NEEDLE."
+  (if (hash-table-p nucleo-completion--subsequence-regexp-cache)
+      (let ((cached (gethash needle nucleo-completion--subsequence-regexp-cache
+                             :missing)))
+        (if (not (eq cached :missing))
+            cached
+          (let ((regexp (nucleo-completion--subsequence-regexp-1 needle)))
+            (puthash needle regexp nucleo-completion--subsequence-regexp-cache)
+            regexp)))
+    (nucleo-completion--subsequence-regexp-1 needle)))
+
+(defun nucleo-completion--subsequence-regexp-1 (needle)
+  "Return an uncached fuzzy subsequence regexp for NEEDLE."
   (mapconcat
    (lambda (ch)
      (let ((s (char-to-string ch)))
@@ -673,7 +698,10 @@ SCORE is compared to MAX-SCORE when both are non-nil."
 (defun nucleo-completion--all-completions-1 (string table &optional pred point)
   "Get Nucleo completions of STRING in TABLE.
 See `completion-all-completions' for the semantics of PRED and POINT."
-  (let ((nucleo-completion--regexp-cache (make-hash-table :test #'equal)))
+  (let ((nucleo-completion--regexp-cache (make-hash-table :test #'equal))
+        (nucleo-completion--terms-cache (make-hash-table :test #'equal))
+        (nucleo-completion--subsequence-regexp-cache
+         (make-hash-table :test #'equal)))
     (let* ((beforepoint (substring string 0 point))
            (afterpoint (if point (substring string point) ""))
            (bounds (completion-boundaries beforepoint table pred afterpoint))
@@ -772,8 +800,8 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                  for score = (and score-table (gethash x score-table))
                  for indices = (and indices-table (gethash x indices-table))
                  do (setf x (nucleo-completion--highlight-candidate
-                              needle (copy-sequence x) score max-score
-                              indices))))
+                             needle (copy-sequence x) score max-score
+                             indices))))
       (and all (if (string= prefix "") all (nconc all (length prefix)))))))
 
 ;;;###autoload
