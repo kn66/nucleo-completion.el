@@ -169,6 +169,9 @@ Each entry has the form (FILE . MESSAGE).")
 (defvar nucleo-completion--subsequence-regexp-cache nil
   "Cache for fuzzy subsequence regexps during one completion pass.")
 
+(defvar nucleo-completion--exact-word-regexp-cache nil
+  "Cache for exact word regexps during one completion pass.")
+
 (defvar nucleo-completion--persistent-regexp-cache (make-hash-table :test #'equal)
   "Cache for regexp expander results across completion passes.")
 
@@ -595,16 +598,32 @@ Regexp-only candidates are promoted before module-scored results."
                    collect (list (car entry) score nil)))
     (append regexp-results module-results)))
 
+(defun nucleo-completion--exact-word-regexps (needle)
+  "Return regexps that match NEEDLE terms as complete words."
+  (if (hash-table-p nucleo-completion--exact-word-regexp-cache)
+      (let ((cached (gethash needle nucleo-completion--exact-word-regexp-cache
+                             :missing)))
+        (if (not (eq cached :missing))
+            cached
+          (let ((regexps (nucleo-completion--exact-word-regexps-1 needle)))
+            (puthash needle regexps nucleo-completion--exact-word-regexp-cache)
+            regexps)))
+    (nucleo-completion--exact-word-regexps-1 needle)))
+
+(defun nucleo-completion--exact-word-regexps-1 (needle)
+  "Return uncached regexps that match NEEDLE terms as complete words."
+  (mapcar (lambda (term)
+            (concat "\\(?:\\`\\|[^[:alnum:]_]\\)"
+                    (regexp-quote term)
+                    "\\(?:\\'\\|[^[:alnum:]_]\\)"))
+          (nucleo-completion--terms needle)))
+
 (defun nucleo-completion--exact-word-match-p (needle candidate)
   "Return non-nil when every NEEDLE term occurs as a word in CANDIDATE."
   (let ((case-fold-search completion-ignore-case))
-    (cl-every (lambda (term)
-                (string-match-p
-                 (concat "\\(?:\\`\\|[^[:alnum:]_]\\)"
-                         (regexp-quote term)
-                         "\\(?:\\'\\|[^[:alnum:]_]\\)")
-                 candidate))
-              (nucleo-completion--terms needle))))
+    (cl-every (lambda (regexp)
+                (string-match-p regexp candidate))
+              (nucleo-completion--exact-word-regexps needle))))
 
 (defun nucleo-completion--high-score-p
     (needle candidate score max-score)
@@ -701,6 +720,8 @@ See `completion-all-completions' for the semantics of PRED and POINT."
   (let ((nucleo-completion--regexp-cache (make-hash-table :test #'equal))
         (nucleo-completion--terms-cache (make-hash-table :test #'equal))
         (nucleo-completion--subsequence-regexp-cache
+         (make-hash-table :test #'equal))
+        (nucleo-completion--exact-word-regexp-cache
          (make-hash-table :test #'equal)))
     (let* ((beforepoint (substring string 0 point))
            (afterpoint (if point (substring string point) ""))
@@ -751,8 +772,6 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                                                            module-results)))
           (setq visual-scored
                 (nucleo-completion--results->scored module-results)
-                indices-table (nucleo-completion--results->indices-table
-                               module-results)
                 all (append
                      (mapcar #'nucleo-completion--result-candidate
                              module-results)
@@ -769,8 +788,6 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                 (nucleo-completion--regexp-filter needle long)
                 visual-scored
                 (nucleo-completion--results->scored module-results)
-                indices-table
-                (nucleo-completion--results->indices-table module-results)
                 all (append
                      (mapcar #'nucleo-completion--result-candidate
                              module-results)
@@ -778,23 +795,30 @@ See `completion-all-completions' for the semantics of PRED and POINT."
        (t
         (setq all (nucleo-completion--fallback-filter needle all))))
       (when visual-scored
-        (setq max-score (cdar visual-scored)
-              score-table (nucleo-completion--score-table visual-scored)))
+        (setq max-score (cdar visual-scored)))
       (setq nucleo-completion--filtering-p (not (string= needle "")))
       (setq nucleo-completion--current-prefix prefix
             nucleo-completion--current-result (copy-sequence all))
       (defvar completion-lazy-hilit-fn)
       (if (bound-and-true-p completion-lazy-hilit)
-          (setq completion-lazy-hilit-fn
-                (lambda (candidate)
-                  (let ((score (and score-table
-                                    (gethash (substring-no-properties candidate)
-                                             score-table)))
-                        (indices (and indices-table
-                                      (gethash (substring-no-properties candidate)
-                                               indices-table))))
-                    (nucleo-completion--highlight-candidate
-                     needle candidate score max-score indices))))
+          (progn
+            (when visual-scored
+              (setq score-table (nucleo-completion--score-table visual-scored)
+                    indices-table
+                    (or indices-table
+                        (nucleo-completion--results->indices-table module-results))))
+            (setq completion-lazy-hilit-fn
+                  (lambda (candidate)
+                    (let* ((key (substring-no-properties candidate))
+                           (score (and score-table (gethash key score-table)))
+                           (indices (and indices-table
+                                         (gethash key indices-table))))
+                      (nucleo-completion--highlight-candidate
+                       needle candidate score max-score indices)))))
+        (when (and visual-scored (> highlight-limit 0))
+          (setq score-table (nucleo-completion--score-table visual-scored)
+                indices-table
+                (nucleo-completion--results->indices-table module-results)))
         (cl-loop repeat highlight-limit
                  for x in-ref all
                  for score = (and score-table (gethash x score-table))

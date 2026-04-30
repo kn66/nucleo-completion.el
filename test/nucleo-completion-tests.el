@@ -143,6 +143,12 @@
   (let ((nucleo-completion-high-score-ratio 'invalid))
     (should (= (nucleo-completion--high-score-ratio) 0.85))))
 
+(ert-deftest nucleo-completion-exact-word-regexps-cache-test ()
+  (let ((nucleo-completion--exact-word-regexp-cache
+         (make-hash-table :test #'equal)))
+    (should (eq (nucleo-completion--exact-word-regexps "foo bar")
+                (nucleo-completion--exact-word-regexps "foo bar")))))
+
 (ert-deftest nucleo-completion-long-candidate-threshold-sanitizes-test ()
   (let ((nucleo-completion-long-candidate-threshold 3))
     (should (= (nucleo-completion--long-candidate-threshold) 3)))
@@ -693,6 +699,46 @@
                  (get-text-property 0 'face (car all))))
         (should (memq 'nucleo-completion-low-score-face
                       (ensure-list (get-text-property 0 'face (cadr all)))))))))
+
+(ert-deftest nucleo-completion-skips-highlight-tables-when-unused-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-max-highlighted-completions 0)
+        (completion-lazy-hilit nil))
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle _candidates _ignore-case _by-length
+                                _alphabetically _limit)
+                 '(("foo" 100 (0 1)) ("fob" 50 (0 1)))))
+              ((symbol-function 'nucleo-completion--score-table)
+               (lambda (_scored)
+                 (error "score table must not be built")))
+              ((symbol-function 'nucleo-completion--results->indices-table)
+               (lambda (_results)
+                 (error "indices table must not be built"))))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "fo" '("foo" "fob" "bar")))
+                     '("foo" "fob"))))))
+
+(ert-deftest nucleo-completion-lazy-highlight-computes-key-once-test ()
+  (let ((completion-ignore-case nil)
+        (completion-lazy-hilit t)
+        (nucleo-completion-max-highlighted-completions 10)
+        (calls 0))
+    (defvar completion-lazy-hilit-fn)
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle _candidates _ignore-case _by-length
+                                _alphabetically _limit)
+                 '(("foo" 100 (0 1)))))
+              ((symbol-function 'substring-no-properties)
+               (lambda (string &optional start end)
+                 (setq calls (1+ calls))
+                 (if (or start end)
+                     (substring string (or start 0) end)
+                   (copy-sequence string)))))
+      (nucleo-completion-all-completions "fo" '("foo" "bar"))
+      (setq calls 0)
+      (funcall completion-lazy-hilit-fn (copy-sequence "foo"))
+      (should (= calls 1)))))
 
 (ert-deftest nucleo-completion-regexp-only-match-is-high-score-highlighted-test ()
   (let ((completion-ignore-case nil)

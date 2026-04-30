@@ -191,6 +191,16 @@ Emacs 側の completion entry point は ~while-no-input~ で filtering を包み
 cache する。候補 filtering、score-band 判定、eager/lazy highlight が同じ needle と
 term を繰り返し参照しても、同じ純粋な文字列処理を再実行しない。
 
+score と precomputed indices の lookup table は highlight で必要になった場合だけ
+作成する。highlight 件数が 0 で lazy highlight も無効な場合は、module 結果を
+filter/sort 済み候補リストとして使うだけにし、追加の hash table 作成を避ける。
+lazy highlight では候補文字列の property-free key を一度だけ作り、score と indices
+の lookup に再利用する。
+
+score-band highlight が有効な場合、high-score 判定で使う単語完全一致 regexp も
+completion pass ごとに cache する。同じ needle の上位候補を複数 highlight しても、
+term ごとの regexp 文字列を候補ごとに組み立て直さない。
+
 Rust module が使える場合、regexp expander が有効でも先に Rust module で fuzzy
 filtering/scoring を行う。module が fuzzy match として返した候補には Emacs Lisp
 側の regexp filtering を再適用せず、module から漏れた候補だけを
