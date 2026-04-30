@@ -103,6 +103,9 @@
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
                       nucleo-completion-persistent-regexp-cache-size
+                      nucleo-completion-long-candidate-threshold
+                      nucleo-completion-long-candidate-regexp-threshold
+                      nucleo-completion-long-candidate-highlight-threshold
                       nucleo-completion-sort-ties-by-length
                       nucleo-completion-sort-ties-alphabetically
                       nucleo-completion-highlight-score-bands
@@ -128,6 +131,42 @@
     (should (= (nucleo-completion--high-score-ratio) 1.0)))
   (let ((nucleo-completion-high-score-ratio 'invalid))
     (should (= (nucleo-completion--high-score-ratio) 0.85))))
+
+(ert-deftest nucleo-completion-long-candidate-threshold-sanitizes-test ()
+  (let ((nucleo-completion-long-candidate-threshold 3))
+    (should (= (nucleo-completion--long-candidate-threshold) 3)))
+  (let ((nucleo-completion-long-candidate-threshold nil))
+    (should-not (nucleo-completion--long-candidate-threshold)))
+  (let ((nucleo-completion-long-candidate-threshold -1))
+    (should-not (nucleo-completion--long-candidate-threshold)))
+  (let ((nucleo-completion-long-candidate-threshold 'invalid))
+    (should-not (nucleo-completion--long-candidate-threshold))))
+
+(ert-deftest nucleo-completion-long-candidate-regexp-threshold-sanitizes-test ()
+  (let ((nucleo-completion-long-candidate-regexp-threshold 3))
+    (should (= (nucleo-completion--long-candidate-regexp-threshold) 3)))
+  (let ((nucleo-completion-long-candidate-regexp-threshold nil))
+    (should-not (nucleo-completion--long-candidate-regexp-threshold)))
+  (let ((nucleo-completion-long-candidate-regexp-threshold -1))
+    (should-not (nucleo-completion--long-candidate-regexp-threshold)))
+  (let ((nucleo-completion-long-candidate-regexp-threshold 'invalid))
+    (should-not (nucleo-completion--long-candidate-regexp-threshold))))
+
+(ert-deftest nucleo-completion-long-candidate-highlight-threshold-sanitizes-test ()
+  (let ((nucleo-completion-long-candidate-highlight-threshold 3))
+    (should (= (nucleo-completion--long-candidate-highlight-threshold) 3)))
+  (let ((nucleo-completion-long-candidate-highlight-threshold nil))
+    (should-not (nucleo-completion--long-candidate-highlight-threshold)))
+  (let ((nucleo-completion-long-candidate-highlight-threshold -1))
+    (should-not (nucleo-completion--long-candidate-highlight-threshold)))
+  (let ((nucleo-completion-long-candidate-highlight-threshold 'invalid))
+    (should-not (nucleo-completion--long-candidate-highlight-threshold))))
+
+(ert-deftest nucleo-completion-split-scored-candidates-test ()
+  (let ((nucleo-completion-long-candidate-threshold 3))
+    (should (equal (nucleo-completion--split-scored-candidates
+                    '("a" "abcd" "bc" "cdefg"))
+                   '(("a" "bc") ("abcd" "cdefg"))))))
 
 (ert-deftest nucleo-completion-filter-test ()
   (let ((completion-ignore-case nil))
@@ -178,6 +217,74 @@
                       (nucleo-completion-all-completions
                        "fb" '("fb" "foo-baz")))
                      '("fb"))))))
+
+(ert-deftest nucleo-completion-long-candidates-skip-module-scoring-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-long-candidate-threshold 5)
+        (nucleo-completion-highlight-score-bands t)
+        (nucleo-completion-max-highlighted-completions 10)
+        (long-match "foo-baz")
+        (long-miss "foo-xxx"))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit)
+                 (should (equal candidates '("fb")))
+                 '(("fb" 100 (0 1))))))
+      (let ((all (nucleo-completion-all-completions
+                  "fb" (list long-match "fb" long-miss))))
+        (should (equal (nucleo-completion-tests--plain all)
+                       '("fb" "foo-baz")))
+        (should-not
+         (memq 'nucleo-completion-high-score-face
+               (ensure-list (get-text-property 0 'face (cadr all)))))))))
+
+(ert-deftest nucleo-completion-long-candidates-skip-regexp-expanders-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-long-candidate-regexp-threshold 2)
+        (nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (when (string= term "jp")
+                   "日本")))))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil)))
+      (should (equal (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions
+                       "jp" '("日本" "日本語" "jp-long")))
+                     '("日本" "jp-long"))))))
+
+(ert-deftest nucleo-completion-long-candidates-skip-regexp-highlight-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-long-candidate-regexp-threshold 2)
+        (nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (when (string= term "jp")
+                   "日本")))))
+    (should-not
+     (get-text-property
+      0 'face
+      (nucleo-completion-highlight "jp" (copy-sequence "日本語"))))))
+
+(ert-deftest nucleo-completion-long-candidates-skip-match-highlight-test ()
+  (let ((nucleo-completion-long-candidate-highlight-threshold 3))
+    (should-not
+     (get-text-property
+      0 'face
+      (nucleo-completion-highlight "fb" (copy-sequence "foo-baz"))))))
+
+(ert-deftest nucleo-completion-fuzzy-only-regexp-groups-are-lazy-test ()
+  (let ((completion-ignore-case nil)
+        (nucleo-completion-long-candidate-regexp-threshold 100)
+        (calls 0)
+        (original (symbol-function 'nucleo-completion--term-regexp-groups)))
+    (cl-letf (((symbol-function 'nucleo-completion--term-regexp-groups)
+               (lambda (needle &optional fuzzy-only)
+                 (when fuzzy-only
+                   (setq calls (1+ calls)))
+                 (funcall original needle fuzzy-only))))
+      (nucleo-completion--regexp-filter-pairs "fb" '("fb" "foo-baz"))
+      (should (= calls 0)))))
 
 (ert-deftest nucleo-completion-interrupt-keeps-last-filtered-result-test ()
   (let ((completion-ignore-case nil)

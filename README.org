@@ -125,6 +125,21 @@ still-running filter pass while control is in Emacs Lisp.  The Rust module call
 itself is synchronous, so a very large candidate set can still occupy Emacs
 until that module call returns.
 
+Candidates longer than ~nucleo-completion-long-candidate-threshold~ characters
+are filtered but not scored by the Rust module.  They are appended after scored
+matches in their original order, which keeps unusually long lines from
+dominating scoring time while preserving them as selectable matches.  Set the
+option to nil to score every candidate regardless of length.
+
+Candidates longer than ~nucleo-completion-long-candidate-regexp-threshold~
+characters skip regexp expanders such as Migemo during filtering and
+highlighting.  They still use the built-in fuzzy subsequence matcher.  Set the
+option to nil to apply regexp expanders to every candidate regardless of length.
+
+Candidates longer than ~nucleo-completion-long-candidate-highlight-threshold~
+characters skip match highlighting.  Set the option to nil to highlight every
+candidate regardless of length.
+
 Regexp expanders configured with ~nucleo-completion-regexp-functions~ are cached
 for the duration of each completion pass.  This avoids repeatedly invoking slow
 expanders while deciding whether expansion is needed, filtering candidates, and
