@@ -65,28 +65,47 @@ function list, `completion-ignore-case', and `default-directory'."
 Candidates longer than this number of characters are filtered but
 not scored.  Long matching candidates are appended after scored
 matches in their original order.  Set this to nil to score every
-candidate regardless of length."
+candidate regardless of length.
+
+This value also acts as the default ceiling for regexp expander
+matching and match highlighting when
+`nucleo-completion-long-candidate-regexp-threshold' or
+`nucleo-completion-long-candidate-highlight-threshold' are left
+at their `inherit' default."
   :type '(choice (const :tag "Score every candidate" nil)
                  (natnum :tag "Maximum scored candidate length"))
   :group 'nucleo-completion)
 
-(defcustom nucleo-completion-long-candidate-regexp-threshold 4096
+(defcustom nucleo-completion-long-candidate-regexp-threshold 'inherit
   "Maximum candidate length to match with regexp expanders.
 Candidates longer than this number of characters only use the
 built-in fuzzy subsequence matcher; regexps from
 `nucleo-completion-regexp-functions' are skipped during filtering
-and highlighting.  Set this to nil to use regexp expanders for
-every candidate regardless of length."
-  :type '(choice (const :tag "Use regexp expanders for every candidate" nil)
+and highlighting.
+
+When set to the symbol `inherit' (the default) the threshold
+follows `nucleo-completion-long-candidate-threshold'.  Set this
+to nil to use regexp expanders for every candidate regardless of
+length, or to a positive integer to override the inherited
+threshold."
+  :type '(choice (const :tag "Inherit from `nucleo-completion-long-candidate-threshold'"
+                        inherit)
+                 (const :tag "Use regexp expanders for every candidate" nil)
                  (natnum :tag "Maximum regexp-expanded candidate length"))
   :group 'nucleo-completion)
 
-(defcustom nucleo-completion-long-candidate-highlight-threshold 4096
+(defcustom nucleo-completion-long-candidate-highlight-threshold 'inherit
   "Maximum candidate length to highlight.
 Candidates longer than this number of characters are returned
-without match highlighting.  Set this to nil to highlight every
-candidate regardless of length."
-  :type '(choice (const :tag "Highlight every candidate" nil)
+without match highlighting.
+
+When set to the symbol `inherit' (the default) the threshold
+follows `nucleo-completion-long-candidate-threshold'.  Set this
+to nil to highlight every candidate regardless of length, or to
+a positive integer to override the inherited threshold."
+  :type '(choice (const :tag "Inherit from `nucleo-completion-long-candidate-threshold'"
+                        inherit)
+                 (const :tag "Highlight every candidate" nil)
                  (natnum :tag "Maximum highlighted candidate length"))
   :group 'nucleo-completion)
 
@@ -180,10 +199,13 @@ Each entry has the form (FILE . MESSAGE).")
   "Directory containing nucleo-completion.el.")
 
 (defun nucleo-completion--string-key (string)
-  "Return STRING without text properties."
-  (if (stringp string)
-      (substring-no-properties string)
-    string))
+  "Return STRING unchanged.
+Hash tables that key on candidate strings use the `equal' test,
+which compares string contents independently of text properties.
+Stripping properties via `substring-no-properties' would allocate
+a fresh string per call without changing lookup semantics, so the
+function is a no-op."
+  string)
 
 (defun nucleo-completion--rust-library-name ()
   "Return Cargo's dynamic library file name for this platform."
@@ -264,10 +286,15 @@ Each entry has the form (FILE . MESSAGE).")
          (> (length candidate) threshold))))
 
 (defun nucleo-completion--long-candidate-regexp-threshold ()
-  "Return sanitized long-candidate regexp threshold, or nil."
-  (when (and (integerp nucleo-completion-long-candidate-regexp-threshold)
-             (>= nucleo-completion-long-candidate-regexp-threshold 0))
-    nucleo-completion-long-candidate-regexp-threshold))
+  "Return sanitized long-candidate regexp threshold, or nil.
+When the user setting is the symbol `inherit', the value is
+resolved from `nucleo-completion-long-candidate-threshold'."
+  (let ((value (if (eq nucleo-completion-long-candidate-regexp-threshold
+                       'inherit)
+                   nucleo-completion-long-candidate-threshold
+                 nucleo-completion-long-candidate-regexp-threshold)))
+    (when (and (integerp value) (>= value 0))
+      value)))
 
 (defun nucleo-completion--long-candidate-regexp-p (candidate)
   "Return non-nil when CANDIDATE should skip regexp expanders."
@@ -276,10 +303,15 @@ Each entry has the form (FILE . MESSAGE).")
          (> (length candidate) threshold))))
 
 (defun nucleo-completion--long-candidate-highlight-threshold ()
-  "Return sanitized long-candidate highlight threshold, or nil."
-  (when (and (integerp nucleo-completion-long-candidate-highlight-threshold)
-             (>= nucleo-completion-long-candidate-highlight-threshold 0))
-    nucleo-completion-long-candidate-highlight-threshold))
+  "Return sanitized long-candidate highlight threshold, or nil.
+When the user setting is the symbol `inherit', the value is
+resolved from `nucleo-completion-long-candidate-threshold'."
+  (let ((value (if (eq nucleo-completion-long-candidate-highlight-threshold
+                       'inherit)
+                   nucleo-completion-long-candidate-threshold
+                 nucleo-completion-long-candidate-highlight-threshold)))
+    (when (and (integerp value) (>= value 0))
+      value)))
 
 (defun nucleo-completion--long-candidate-highlight-p (candidate)
   "Return non-nil when CANDIDATE should skip match highlighting."
@@ -499,13 +531,21 @@ EXCLUDED is a hash table keyed by `nucleo-completion--string-key'."
 (defun nucleo-completion--split-scored-candidates (candidates)
   "Return (SCORABLE LONG) candidate lists split by length.
 SCORABLE contains candidates that should be sent to the Rust
-module.  LONG contains candidates that should only be filtered."
-  (let (scorable long)
-    (dolist (candidate candidates)
-      (if (nucleo-completion--long-candidate-p candidate)
-          (push candidate long)
-        (push candidate scorable)))
-    (list (nreverse scorable) (nreverse long))))
+module.  LONG contains candidates that should only be filtered.
+When no candidate exceeds the configured length threshold the
+original CANDIDATES list is reused without copying."
+  (let ((threshold (nucleo-completion--long-candidate-threshold)))
+    (cond
+     ((null threshold) (list candidates nil))
+     ((not (cl-some (lambda (c) (> (length c) threshold)) candidates))
+      (list candidates nil))
+     (t
+      (let (scorable long)
+        (dolist (candidate candidates)
+          (if (> (length candidate) threshold)
+              (push candidate long)
+            (push candidate scorable)))
+        (list (nreverse scorable) (nreverse long)))))))
 
 (defun nucleo-completion--fallback-filter (needle candidates)
   "Filter CANDIDATES against NEEDLE without scoring or sorting."
@@ -514,31 +554,213 @@ module.  LONG contains candidates that should only be filtered."
 (defun nucleo-completion--module-filter (needle candidates ignore-case)
   "Filter and sort CANDIDATES against NEEDLE with the Rust module.
 Honor IGNORE-CASE."
-  (mapcar #'nucleo-completion--result-candidate
-          (nucleo-completion--module-results needle candidates ignore-case 0)))
+  (car (nucleo-completion--module-results needle candidates ignore-case 0)))
 
 (defun nucleo-completion--module-filter-with-scores
     (needle candidates ignore-case)
   "Filter CANDIDATES against NEEDLE with the Rust module and keep scores.
-Honor IGNORE-CASE."
-  (nucleo-completion--results->scored
-   (nucleo-completion--module-results needle candidates ignore-case 0)))
+Honor IGNORE-CASE.  The result is an alist of (CANDIDATE . SCORE)."
+  (let* ((bundle (nucleo-completion--module-results
+                  needle candidates ignore-case 0 t))
+         (cands (nth 0 bundle))
+         (scores (nth 2 bundle)))
+    (cl-mapcar #'cons cands scores)))
 
 (defun nucleo-completion--module-ready-p ()
   "Return non-nil when the current Rust module provides the batch API."
   (fboundp 'nucleo-completion-candidates))
 
+(defun nucleo-completion--module-supports-bundle-p ()
+  "Return non-nil when the Rust module accepts the 7-argument bundle API.
+Also returns non-nil for variadic stubs used in tests so they
+exercise the bundle code path without re-implementing the
+six-argument adapter."
+  (let* ((arity (and (fboundp 'nucleo-completion-candidates)
+                     (func-arity 'nucleo-completion-candidates)))
+         (max-arity (and arity (cdr arity))))
+    (or (eq max-arity 'many)
+        (and (numberp max-arity) (>= max-arity 7)))))
+
+(defconst nucleo-completion--max-unicode-codepoint #x10FFFF
+  "Highest character that the Rust module can encode as UTF-8.
+Frontends like Consult append \"tofu\" disambiguation characters
+beyond Unicode (codepoints at #x200000 and above), which fail the
+module's `copy_string_contents' UTF-8 encoder.  Such characters
+must be stripped before crossing the FFI boundary.")
+
+(defun nucleo-completion--unicode-string-p (string)
+  "Return non-nil when every character in STRING is a Unicode codepoint."
+  (let ((max nucleo-completion--max-unicode-codepoint)
+        (i 0)
+        (len (length string))
+        (ok t))
+    (while (and ok (< i len))
+      (when (> (aref string i) max)
+        (setq ok nil))
+      (setq i (1+ i)))
+    ok))
+
+(defun nucleo-completion--scrub-non-unicode-string (string)
+  "Return STRING with non-Unicode characters removed.
+Returns STRING itself when no character needs to be removed so
+the caller can detect untouched candidates with `eq'."
+  (if (nucleo-completion--unicode-string-p string)
+      string
+    (let ((max nucleo-completion--max-unicode-codepoint)
+          (i 0)
+          (len (length string))
+          chars)
+      (while (< i len)
+        (let ((ch (aref string i)))
+          (when (<= ch max)
+            (push ch chars)))
+        (setq i (1+ i)))
+      (apply #'string (nreverse chars)))))
+
+(defun nucleo-completion--scrub-candidates (candidates)
+  "Return (CLEANED . MAP) where CLEANED is suitable for the Rust module.
+Walks CANDIDATES once and substitutes any string carrying
+characters above `nucleo-completion--max-unicode-codepoint' with a
+scrubbed copy.  MAP is a hash table from each substituted
+scrubbed string to the original candidates in input order.  The
+list value preserves distinct originals that scrub to the same
+string.  When no candidate needs scrubbing the original CANDIDATES
+list is returned unchanged and MAP is nil."
+  (let (map cleaned)
+    (dolist (candidate candidates)
+      (let ((scrubbed (nucleo-completion--scrub-non-unicode-string candidate)))
+        (push scrubbed cleaned)
+        (unless (eq scrubbed candidate)
+          (unless map
+            (setq map (make-hash-table :test #'equal
+                                       :size (length candidates))))
+          (puthash scrubbed (cons candidate (gethash scrubbed map)) map))))
+    (when map
+      (maphash (lambda (scrubbed originals)
+                 (puthash scrubbed (nreverse originals) map))
+               map))
+    (cons (if map (nreverse cleaned) candidates) map)))
+
+(defun nucleo-completion--copy-scrub-map (map)
+  "Return a copy of scrub MAP with independent queue lists."
+  (let ((copy (make-hash-table :test #'equal :size (hash-table-count map))))
+    (maphash (lambda (scrubbed originals)
+               (puthash scrubbed (copy-sequence originals) copy))
+             map)
+    copy))
+
+(defun nucleo-completion--restore-scrubbed-candidate (candidate map)
+  "Return original candidate for scrubbed CANDIDATE using queue MAP."
+  (let ((originals (gethash candidate map)))
+    (if originals
+        (prog1 (car originals)
+          (puthash candidate (cdr originals) map))
+      candidate)))
+
+(defun nucleo-completion--restore-bundle-candidates (bundle map)
+  "Replace scrubbed candidates inside BUNDLE with originals from MAP.
+MAP values are queues in input order, so candidates that scrub to
+the same string still restore to distinct originals.  Mutates
+BUNDLE in place because the lists were freshly returned by the
+Rust module and are not shared with any other caller."
+  (let ((candidate-map (nucleo-completion--copy-scrub-map map))
+        (top-info-map (nucleo-completion--copy-scrub-map map)))
+    (cl-loop for cell on (nucleo-completion--bundle-candidates bundle)
+             do (setcar cell
+                        (nucleo-completion--restore-scrubbed-candidate
+                         (car cell) candidate-map)))
+    (dolist (entry (nucleo-completion--bundle-top-info bundle))
+      (setcar entry
+              (nucleo-completion--restore-scrubbed-candidate
+               (car entry) top-info-map))))
+  bundle)
+
 (defun nucleo-completion--module-results
-    (needle candidates ignore-case highlight-limit)
-  "Return module result entries for NEEDLE and CANDIDATES.
-Each entry has the form (CANDIDATE SCORE INDICES).  Honor
-IGNORE-CASE and ask the module for INDICES for at most
-HIGHLIGHT-LIMIT top-ranking candidates."
-  (nucleo-completion-candidates
-   needle candidates ignore-case
-   nucleo-completion-sort-ties-by-length
-   nucleo-completion-sort-ties-alphabetically
-   highlight-limit))
+    (needle candidates ignore-case highlight-limit &optional return-all-scores)
+  "Return module result bundle for NEEDLE and CANDIDATES.
+The bundle is the list (CANDIDATES TOP-INFO FULL-SCORES) returned
+by the Rust module:
+
+  CANDIDATES   - matches sorted by descending score.
+  TOP-INFO     - list of (CAND SCORE INDICES) entries for at most
+                 HIGHLIGHT-LIMIT top-ranking candidates.  INDICES is
+                 the highlight index list for CAND when available,
+                 otherwise nil.
+  FULL-SCORES  - parallel-to-CANDIDATES list of integer scores when
+                 RETURN-ALL-SCORES is non-nil; otherwise nil.
+
+Honor IGNORE-CASE.  Pre-bundle Rust modules (six-argument arity)
+return a flat list of (CAND SCORE INDICES) triples; this function
+adapts that legacy shape so callers can use one bundle layout.
+
+Frontends such as Consult append \"tofu\" disambiguation characters
+whose codepoints exceed Unicode's maximum, which the Rust module
+cannot encode as UTF-8.  Such candidates are scrubbed of those
+characters before being passed to the module and the original
+candidate strings are restored on the way back so their text
+properties (Consult metadata, invisibility, faces) survive."
+  (pcase-let* ((`(,cleaned . ,map)
+                (nucleo-completion--scrub-candidates candidates))
+               (bundle
+                (if (nucleo-completion--module-supports-bundle-p)
+                    (nucleo-completion-candidates
+                     needle cleaned ignore-case
+                     nucleo-completion-sort-ties-by-length
+                     nucleo-completion-sort-ties-alphabetically
+                     highlight-limit
+                     return-all-scores)
+                  (let ((triples
+                         (nucleo-completion-candidates
+                          needle cleaned ignore-case
+                          nucleo-completion-sort-ties-by-length
+                          nucleo-completion-sort-ties-alphabetically
+                          highlight-limit)))
+                    (list (mapcar #'car triples)
+                          triples
+                          (when return-all-scores
+                            (mapcar #'cadr triples)))))))
+    (if map
+        (nucleo-completion--restore-bundle-candidates bundle map)
+      bundle)))
+
+(defun nucleo-completion--bundle-candidates (bundle)
+  "Return the candidate list from BUNDLE."
+  (nth 0 bundle))
+
+(defun nucleo-completion--bundle-top-info (bundle)
+  "Return the top-info list from BUNDLE."
+  (nth 1 bundle))
+
+(defun nucleo-completion--bundle-full-scores (bundle)
+  "Return the parallel score list from BUNDLE, or nil."
+  (nth 2 bundle))
+
+(defun nucleo-completion--top-info-candidate (entry)
+  "Return ENTRY's candidate."
+  (nth 0 entry))
+
+(defun nucleo-completion--top-info-score (entry)
+  "Return ENTRY's score."
+  (nth 1 entry))
+
+(defun nucleo-completion--top-info-indices (entry)
+  "Return ENTRY's precomputed highlight indices."
+  (nth 2 entry))
+
+(defun nucleo-completion--top-info-hash (top-info)
+  "Return a hash table mapping candidates in TOP-INFO to entries."
+  (let ((table (make-hash-table :test #'equal :size (length top-info))))
+    (dolist (entry top-info)
+      (puthash (nucleo-completion--top-info-candidate entry) entry table))
+    table))
+
+(defun nucleo-completion--full-scores-hash (candidates full-scores)
+  "Return hash table mapping CANDIDATES to FULL-SCORES.
+Both lists must be the same length."
+  (let ((table (make-hash-table :test #'equal :size (length candidates))))
+    (cl-mapc (lambda (cand score) (puthash cand score table))
+             candidates full-scores)
+    table))
 
 (defun nucleo-completion--result-candidate (result)
   "Return RESULT's candidate."
@@ -560,14 +782,18 @@ HIGHLIGHT-LIMIT top-ranking candidates."
           results))
 
 (defun nucleo-completion--results->indices-table (results)
-  "Return hash table mapping candidates in RESULTS to precomputed indices."
-  (let ((table (make-hash-table :test #'equal)))
-    (dolist (result results)
-      (when (nucleo-completion--result-indices result)
-        (puthash (nucleo-completion--string-key
-                  (nucleo-completion--result-candidate result))
-                 (nucleo-completion--result-indices result)
-                 table)))
+  "Return hash table mapping candidates in RESULTS to precomputed indices.
+Only the first `nucleo-completion-max-highlighted-completions'
+results are inspected because the Rust module only computes
+indices for the top-ranked entries."
+  (let ((table (make-hash-table :test #'equal))
+        (limit (nucleo-completion--highlight-limit)))
+    (cl-loop for result in results
+             repeat limit
+             for indices = (nucleo-completion--result-indices result)
+             when indices
+             do (puthash (nucleo-completion--result-candidate result)
+                         indices table))
     table))
 
 (defun nucleo-completion--results->candidate-table (results)
@@ -585,18 +811,98 @@ Regexp-only candidates are promoted before module-scored results."
   (let ((seen (make-hash-table :test #'equal))
         regexp-results)
     (dolist (result module-results)
-      (puthash (nucleo-completion--string-key
-                (nucleo-completion--result-candidate result))
-               t seen))
+      (puthash (nucleo-completion--result-candidate result) t seen))
     (setq regexp-results
           (cl-loop with score = (or (nucleo-completion--result-score
                                      (car module-results))
                                     1)
                    for entry in regexp-pairs
-                   unless (gethash (nucleo-completion--string-key (car entry))
-                                   seen)
+                   unless (gethash (car entry) seen)
                    collect (list (car entry) score nil)))
     (append regexp-results module-results)))
+
+(defun nucleo-completion--merge-regexp-and-module-results
+    (needle scorable module-results)
+  "Return MODULE-RESULTS with regexp-only matches from SCORABLE prepended.
+Walks SCORABLE once, skipping candidates already covered by
+MODULE-RESULTS and keeping those that match the regexps expanded
+from NEEDLE.  Each prepended entry is a triple
+\(CANDIDATE BEST-SCORE nil\) compatible with the legacy module
+result list format."
+  (let ((seen (make-hash-table :test #'equal :size (length module-results)))
+        (case-fold-search completion-ignore-case)
+        (regexp-groups (nucleo-completion--term-regexp-groups needle))
+        (best-score (or (and module-results
+                             (nucleo-completion--result-score
+                              (car module-results)))
+                        1))
+        fuzzy-regexp-groups
+        regexp-results)
+    (dolist (result module-results)
+      (puthash (nucleo-completion--result-candidate result) t seen))
+    (dolist (candidate scorable)
+      (unless (gethash candidate seen)
+        (when (nucleo-completion--regexp-match-p
+               (if (nucleo-completion--long-candidate-regexp-p candidate)
+                   (or fuzzy-regexp-groups
+                       (setq fuzzy-regexp-groups
+                             (nucleo-completion--term-regexp-groups
+                              needle t)))
+                 regexp-groups)
+               candidate)
+          (push (list candidate best-score nil) regexp-results))))
+    (nconc (nreverse regexp-results) module-results)))
+
+(defun nucleo-completion--regexp-only-candidates
+    (needle scorable module-candidates)
+  "Return SCORABLE candidates not in MODULE-CANDIDATES that match NEEDLE regexps.
+Walks SCORABLE once.  Long candidates fall back to the fuzzy
+regexp set, mirroring `nucleo-completion--regexp-filter-pairs'."
+  (let ((seen (make-hash-table :test #'equal
+                               :size (max 1 (length module-candidates))))
+        (case-fold-search completion-ignore-case)
+        (regexp-groups (nucleo-completion--term-regexp-groups needle))
+        fuzzy-regexp-groups
+        result)
+    (dolist (candidate module-candidates)
+      (puthash candidate t seen))
+    (dolist (candidate scorable)
+      (unless (gethash candidate seen)
+        (when (nucleo-completion--regexp-match-p
+               (if (nucleo-completion--long-candidate-regexp-p candidate)
+                   (or fuzzy-regexp-groups
+                       (setq fuzzy-regexp-groups
+                             (nucleo-completion--term-regexp-groups
+                              needle t)))
+                 regexp-groups)
+               candidate)
+          (push candidate result))))
+    (nreverse result)))
+
+(defun nucleo-completion--prepend-regexp-only-matches
+    (needle scorable bundle)
+  "Return BUNDLE with regexp-only matches from SCORABLE prepended.
+BUNDLE is (CANDIDATES TOP-INFO FULL-SCORES).  Returns a new
+bundle with the same shape.  For each prepended candidate a
+synthetic top-info entry (CAND MAX-SCORE nil) is added so the
+score-band highlighter still classifies these matches in the high
+band, and FULL-SCORES, when present, is extended with MAX-SCORE
+entries to keep the parallel-array invariant."
+  (pcase-let* ((`(,module-candidates ,top-info ,full-scores) bundle)
+               (max-score (or (and top-info
+                                   (nucleo-completion--top-info-score
+                                    (car top-info)))
+                              1))
+               (extra (nucleo-completion--regexp-only-candidates
+                       needle scorable module-candidates)))
+    (if (null extra)
+        bundle
+      (list (append extra module-candidates)
+            (append (mapcar (lambda (cand) (list cand max-score nil)) extra)
+                    top-info)
+            (when full-scores
+              (append (mapcar (lambda (_) max-score) extra)
+                      full-scores))))))
 
 (defun nucleo-completion--exact-word-regexps (needle)
   "Return regexps that match NEEDLE terms as complete words."
@@ -665,7 +971,18 @@ SCORE is compared to MAX-SCORE."
   "Return a hash table mapping candidates to scores from SCORED."
   (let ((table (make-hash-table :test #'equal)))
     (dolist (entry scored)
-      (puthash (nucleo-completion--string-key (car entry)) (cdr entry) table))
+      (puthash (car entry) (cdr entry) table))
+    table))
+
+(defun nucleo-completion--score-table-from-results (results)
+  "Return a hash table mapping candidates from RESULTS to scores.
+Avoids materializing the intermediate (CANDIDATE . SCORE) list
+that `nucleo-completion--results->scored' would allocate."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (result results)
+      (puthash (nucleo-completion--result-candidate result)
+               (nucleo-completion--result-score result)
+               table))
     table))
 
 (defun nucleo-completion--highlight-regexp (regexp haystack)
@@ -717,12 +1034,15 @@ SCORE is compared to MAX-SCORE when both are non-nil."
 (defun nucleo-completion--all-completions-1 (string table &optional pred point)
   "Get Nucleo completions of STRING in TABLE.
 See `completion-all-completions' for the semantics of PRED and POINT."
-  (let ((nucleo-completion--regexp-cache (make-hash-table :test #'equal))
-        (nucleo-completion--terms-cache (make-hash-table :test #'equal))
-        (nucleo-completion--subsequence-regexp-cache
-         (make-hash-table :test #'equal))
-        (nucleo-completion--exact-word-regexp-cache
-         (make-hash-table :test #'equal)))
+  (let* ((nucleo-completion--terms-cache (make-hash-table :test #'equal))
+         (nucleo-completion--subsequence-regexp-cache
+          (make-hash-table :test #'equal))
+         (nucleo-completion--regexp-cache
+          (and nucleo-completion-regexp-functions
+               (make-hash-table :test #'equal)))
+         (nucleo-completion--exact-word-regexp-cache
+          (and nucleo-completion-highlight-score-bands
+               (make-hash-table :test #'equal))))
     (let* ((beforepoint (substring string 0 point))
            (afterpoint (if point (substring string point) ""))
            (bounds (completion-boundaries beforepoint table pred afterpoint))
@@ -731,6 +1051,9 @@ See `completion-all-completions' for the semantics of PRED and POINT."
            (module-p (nucleo-completion--module-ready-p))
            (expanded-regexp-p (nucleo-completion--expanded-regexp-p needle))
            (highlight-limit (nucleo-completion--highlight-limit))
+           (lazy-hilit-p (bound-and-true-p completion-lazy-hilit))
+           (need-full-scores
+            (and lazy-hilit-p nucleo-completion-highlight-score-bands))
            (completion-regexp-list
             (if (or expanded-regexp-p module-p)
                 completion-regexp-list
@@ -742,10 +1065,9 @@ See `completion-all-completions' for the semantics of PRED and POINT."
                                   (string= needle ""))))
                     table
                   (all-completions prefix table pred)))
-           visual-scored
-           module-results
-           score-table
-           indices-table
+           bundle
+           top-info
+           full-scores
            max-score
            long-filtered)
       (unless (equal prefix nucleo-completion--current-prefix)
@@ -753,79 +1075,69 @@ See `completion-all-completions' for the semantics of PRED and POINT."
               nucleo-completion--current-result nil))
       (cond
        ((or (null all) (string= needle "")))
-       ((and module-p expanded-regexp-p)
-        (pcase-let ((`(,scorable ,long)
-                     (nucleo-completion--split-scored-candidates all)))
-          (setq module-results
-                (when scorable
-                  (nucleo-completion--module-results
-                   needle scorable completion-ignore-case highlight-limit))
-                long-filtered
-                (nucleo-completion--regexp-filter needle long))
-          (let ((regexp-pairs
-                 (nucleo-completion--regexp-filter-pairs-excluding
-                  needle scorable
-                  (nucleo-completion--results->candidate-table
-                   module-results))))
-            (setq module-results
-                  (nucleo-completion--merge-regexp-results regexp-pairs
-                                                           module-results)))
-          (setq visual-scored
-                (nucleo-completion--results->scored module-results)
-                all (append
-                     (mapcar #'nucleo-completion--result-candidate
-                             module-results)
-                     long-filtered))))
        (module-p
         (pcase-let ((`(,scorable ,long)
                      (nucleo-completion--split-scored-candidates all)))
-          (setq module-results
-                (when scorable
-                  (nucleo-completion--module-results
-                   needle scorable completion-ignore-case
-                   highlight-limit))
-                long-filtered
-                (nucleo-completion--regexp-filter needle long)
-                visual-scored
-                (nucleo-completion--results->scored module-results)
-                all (append
-                     (mapcar #'nucleo-completion--result-candidate
-                             module-results)
+          (setq long-filtered (nucleo-completion--regexp-filter needle long))
+          (when scorable
+            (setq bundle (nucleo-completion--module-results
+                          needle scorable completion-ignore-case
+                          highlight-limit need-full-scores)))
+          (when (and scorable expanded-regexp-p)
+            (setq bundle
+                  (nucleo-completion--prepend-regexp-only-matches
+                   needle scorable (or bundle (list nil nil nil)))))
+          (when bundle
+            (setq top-info (nucleo-completion--bundle-top-info bundle)
+                  full-scores (nucleo-completion--bundle-full-scores bundle)))
+          (setq all (append
+                     (and bundle (nucleo-completion--bundle-candidates bundle))
                      long-filtered))))
        (t
         (setq all (nucleo-completion--fallback-filter needle all))))
-      (when visual-scored
-        (setq max-score (cdar visual-scored)))
+      (when top-info
+        (setq max-score (nucleo-completion--top-info-score (car top-info))))
       (setq nucleo-completion--filtering-p (not (string= needle "")))
       (setq nucleo-completion--current-prefix prefix
-            nucleo-completion--current-result (copy-sequence all))
+            nucleo-completion--current-result
+            (if (string= prefix "") all (copy-sequence all)))
       (defvar completion-lazy-hilit-fn)
-      (if (bound-and-true-p completion-lazy-hilit)
-          (progn
-            (when visual-scored
-              (setq score-table (nucleo-completion--score-table visual-scored)
-                    indices-table
-                    (or indices-table
-                        (nucleo-completion--results->indices-table module-results))))
-            (setq completion-lazy-hilit-fn
-                  (lambda (candidate)
-                    (let* ((key (substring-no-properties candidate))
-                           (score (and score-table (gethash key score-table)))
-                           (indices (and indices-table
-                                         (gethash key indices-table))))
-                      (nucleo-completion--highlight-candidate
-                       needle candidate score max-score indices)))))
-        (when (and visual-scored (> highlight-limit 0))
-          (setq score-table (nucleo-completion--score-table visual-scored)
-                indices-table
-                (nucleo-completion--results->indices-table module-results)))
-        (cl-loop repeat highlight-limit
-                 for x in-ref all
-                 for score = (and score-table (gethash x score-table))
-                 for indices = (and indices-table (gethash x indices-table))
-                 do (setf x (nucleo-completion--highlight-candidate
-                             needle (copy-sequence x) score max-score
-                             indices))))
+      (cond
+       (lazy-hilit-p
+        (let ((info-hash (and top-info
+                              (nucleo-completion--top-info-hash top-info)))
+              (score-hash (and full-scores
+                               (nucleo-completion--full-scores-hash
+                                (nucleo-completion--bundle-candidates bundle)
+                                full-scores))))
+          (setq completion-lazy-hilit-fn
+                (lambda (candidate)
+                  (let* ((info (and info-hash
+                                    (gethash candidate info-hash)))
+                         (score (or (and info
+                                         (nucleo-completion--top-info-score
+                                          info))
+                                    (and score-hash
+                                         (gethash candidate score-hash))))
+                         (indices (and info
+                                       (nucleo-completion--top-info-indices
+                                        info))))
+                    (nucleo-completion--highlight-candidate
+                     needle candidate score max-score indices))))))
+       ((and (> highlight-limit 0) all)
+        (let ((info-hash (and top-info
+                              (nucleo-completion--top-info-hash top-info))))
+          (cl-loop repeat highlight-limit
+                   for x in-ref all
+                   for info = (and info-hash (gethash x info-hash))
+                   for score = (and info
+                                    (nucleo-completion--top-info-score info))
+                   for indices = (and info
+                                      (nucleo-completion--top-info-indices
+                                       info))
+                   do (setf x (nucleo-completion--highlight-candidate
+                               needle (copy-sequence x) score max-score
+                               indices))))))
       (and all (if (string= prefix "") all (nconc all (length prefix)))))))
 
 ;;;###autoload

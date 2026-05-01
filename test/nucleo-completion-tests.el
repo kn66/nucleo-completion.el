@@ -7,6 +7,28 @@
 (defun nucleo-completion-tests--plain (strings)
   (mapcar #'substring-no-properties strings))
 
+(defun nucleo-completion-tests--bundle (triples &optional return-all-scores)
+  "Build a module-result bundle from TRIPLES.
+Each element of TRIPLES has the form (CAND SCORE INDICES) and is
+placed verbatim into the top-info slot.  CANDIDATES is the
+candidate list (in the same order as TRIPLES).  FULL-SCORES is
+populated when RETURN-ALL-SCORES is non-nil."
+  (list (mapcar #'car triples)
+        triples
+        (when return-all-scores
+          (mapcar #'cadr triples))))
+
+(defmacro nucleo-completion-tests--with-mock-candidates (triples &rest body)
+  "Stub `nucleo-completion-candidates' to return TRIPLES wrapped as a bundle."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'nucleo-completion-candidates)
+              (lambda (_needle _candidates _ignore-case _by-length
+                               _alphabetically _limit
+                               &optional return-all-scores)
+                (nucleo-completion-tests--bundle ,triples
+                                                 return-all-scores))))
+     ,@body))
+
 (defun nucleo-completion-tests--high-score-face-p (faces)
   (cl-some (lambda (face)
              (eq face 'nucleo-completion-high-score-face))
@@ -179,6 +201,113 @@
   (let ((nucleo-completion-long-candidate-highlight-threshold 'invalid))
     (should-not (nucleo-completion--long-candidate-highlight-threshold))))
 
+(ert-deftest nucleo-completion-long-candidate-regexp-threshold-inherit-test ()
+  "When set to `inherit', the regexp threshold follows the main one."
+  (let ((nucleo-completion-long-candidate-threshold 7)
+        (nucleo-completion-long-candidate-regexp-threshold 'inherit))
+    (should (= (nucleo-completion--long-candidate-regexp-threshold) 7)))
+  (let ((nucleo-completion-long-candidate-threshold nil)
+        (nucleo-completion-long-candidate-regexp-threshold 'inherit))
+    (should-not (nucleo-completion--long-candidate-regexp-threshold)))
+  (let ((nucleo-completion-long-candidate-threshold 9)
+        (nucleo-completion-long-candidate-regexp-threshold 4))
+    (should (= (nucleo-completion--long-candidate-regexp-threshold) 4))))
+
+(ert-deftest nucleo-completion-long-candidate-highlight-threshold-inherit-test ()
+  "When set to `inherit', the highlight threshold follows the main one."
+  (let ((nucleo-completion-long-candidate-threshold 7)
+        (nucleo-completion-long-candidate-highlight-threshold 'inherit))
+    (should (= (nucleo-completion--long-candidate-highlight-threshold) 7)))
+  (let ((nucleo-completion-long-candidate-threshold nil)
+        (nucleo-completion-long-candidate-highlight-threshold 'inherit))
+    (should-not (nucleo-completion--long-candidate-highlight-threshold)))
+  (let ((nucleo-completion-long-candidate-threshold 9)
+        (nucleo-completion-long-candidate-highlight-threshold 4))
+    (should (= (nucleo-completion--long-candidate-highlight-threshold) 4))))
+
+(ert-deftest nucleo-completion-unicode-string-p-test ()
+  (should (nucleo-completion--unicode-string-p ""))
+  (should (nucleo-completion--unicode-string-p "abc"))
+  (should (nucleo-completion--unicode-string-p "ABC"))
+  (let ((tofu (string #x200000)))
+    (should-not (nucleo-completion--unicode-string-p tofu))
+    (should-not (nucleo-completion--unicode-string-p
+                 (concat "abc" tofu)))))
+
+(ert-deftest nucleo-completion-scrub-non-unicode-string-test ()
+  (let ((clean "abc")
+        (tofu (string #x200001)))
+    (should (eq (nucleo-completion--scrub-non-unicode-string clean) clean))
+    (should (equal (nucleo-completion--scrub-non-unicode-string
+                    (concat "abc" tofu))
+                   "abc"))
+    (should (equal (nucleo-completion--scrub-non-unicode-string
+                    (concat "a" tofu "b" tofu "c"))
+                   "abc"))))
+
+(ert-deftest nucleo-completion-scrub-candidates-keeps-list-when-clean-test ()
+  (let* ((candidates '("foo" "bar"))
+         (result (nucleo-completion--scrub-candidates candidates)))
+    (should (eq (car result) candidates))
+    (should-not (cdr result))))
+
+(ert-deftest nucleo-completion-scrub-candidates-strips-non-unicode-test ()
+  (let* ((tofu (string #x200002))
+         (consult-cand (concat "abc-def" tofu))
+         (result (nucleo-completion--scrub-candidates
+                  (list "foo" consult-cand)))
+         (cleaned (car result))
+         (map (cdr result)))
+    (should (equal cleaned '("foo" "abc-def")))
+    (should map)
+    (should (equal (gethash "abc-def" map) (list consult-cand)))))
+
+(ert-deftest nucleo-completion-module-results-restores-original-candidates-test ()
+  "Tofu-bearing candidates round-trip through the module unchanged."
+  (let* ((tofu (string #x200003))
+         (consult-cand (concat "abc-def" tofu))
+         (received-input nil))
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (setq received-input candidates)
+                 (nucleo-completion-tests--bundle
+                  (mapcar (lambda (c) (list c 100 nil)) candidates)
+                  return-all-scores))))
+      (let* ((bundle (nucleo-completion--module-results
+                      "abc" (list "foo" consult-cand) nil 0 t))
+             (returned (nucleo-completion--bundle-candidates bundle))
+             (top-info (nucleo-completion--bundle-top-info bundle)))
+        (should (equal received-input '("foo" "abc-def")))
+        (should (eq (cadr returned) consult-cand))
+        (should (eq (car (cadr top-info)) consult-cand))))))
+
+(ert-deftest nucleo-completion-module-results-restores-duplicate-scrubbed-candidates-test ()
+  "Candidates with the same scrubbed text restore to distinct originals."
+  (let* ((tofu-a (string #x200004))
+         (tofu-b (string #x200005))
+         (cand-a (concat "same" tofu-a))
+         (cand-b (concat "same" tofu-b))
+         received-input)
+    (cl-letf (((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (setq received-input candidates)
+                 (nucleo-completion-tests--bundle
+                  (mapcar (lambda (c) (list c 100 nil)) candidates)
+                  return-all-scores))))
+      (let* ((bundle (nucleo-completion--module-results
+                      "same" (list cand-a cand-b) nil 2 t))
+             (returned (nucleo-completion--bundle-candidates bundle))
+             (top-info (nucleo-completion--bundle-top-info bundle)))
+        (should (equal received-input '("same" "same")))
+        (should (eq (car returned) cand-a))
+        (should (eq (cadr returned) cand-b))
+        (should (eq (caar top-info) cand-a))
+        (should (eq (caadr top-info) cand-b))))))
+
 (ert-deftest nucleo-completion-split-scored-candidates-test ()
   (let ((nucleo-completion-long-candidate-threshold 3))
     (should (equal (nucleo-completion--split-scored-candidates
@@ -227,9 +356,11 @@
                (lambda () t))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle _candidates _ignore-case _by-length
-                                _alphabetically limit)
+                                _alphabetically limit
+                                &optional return-all-scores)
                  (should (= limit 0))
-                 '(("fb" 100 nil)))))
+                 (nucleo-completion-tests--bundle '(("fb" 100 nil))
+                                                  return-all-scores))))
       (should (equal (nucleo-completion-tests--plain
                       (nucleo-completion-all-completions
                        "fb" '("fb" "foo-baz")))
@@ -246,9 +377,11 @@
                (lambda () t))
               ((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
-                                _alphabetically _limit)
+                                _alphabetically _limit
+                                &optional return-all-scores)
                  (should (equal candidates '("fb")))
-                 '(("fb" 100 (0 1))))))
+                 (nucleo-completion-tests--bundle '(("fb" 100 (0 1)))
+                                                  return-all-scores))))
       (let ((all (nucleo-completion-all-completions
                   "fb" (list long-match "fb" long-miss))))
         (should (equal (nucleo-completion-tests--plain all)
@@ -472,20 +605,25 @@
                    "日本")))))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
-                                _alphabetically _limit)
-                 (cl-loop for candidate in candidates
-                          when (string-match-p "roman" candidate)
-                          collect (list candidate 128 nil)))))
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  (cl-loop for candidate in candidates
+                           when (string-match-p "roman" candidate)
+                           collect (list candidate 128 nil))
+                  return-all-scores))))
       (should (equal (let* ((candidates '("日本語" "roman-nihon" "日本史"))
                             (regexp-pairs
                              (nucleo-completion--regexp-filter-pairs
                               "nihon" candidates))
-                            (module-results
+                            (bundle
                              (nucleo-completion--module-results
-                              "nihon" (mapcar #'car regexp-pairs) nil 0)))
-                     (mapcar #'nucleo-completion--result-candidate
-                              (nucleo-completion--merge-regexp-results
-                               regexp-pairs module-results)))
+                              "nihon" (mapcar #'car regexp-pairs) nil 0))
+                            (module-results
+                             (nucleo-completion--bundle-top-info bundle)))
+                       (mapcar #'nucleo-completion--result-candidate
+                               (nucleo-completion--merge-regexp-results
+                                regexp-pairs module-results)))
                      '("日本語" "日本史" "roman-nihon"))))))
 
 (ert-deftest nucleo-completion-module-skips-regexp-filter-for-module-matches-test ()
@@ -496,10 +634,13 @@
         seen)
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
-                                _alphabetically _limit)
-                 (cl-loop for candidate in candidates
-                          when (string-match-p "roman" candidate)
-                          collect (list candidate 128 nil))))
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  (cl-loop for candidate in candidates
+                           when (string-match-p "roman" candidate)
+                           collect (list candidate 128 nil))
+                  return-all-scores)))
               ((symbol-function 'nucleo-completion--regexp-match-p)
                (lambda (regexp-groups candidate)
                  (push candidate seen)
@@ -521,15 +662,20 @@
                    "日本")))))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle _candidates _ignore-case _by-length
-                                _alphabetically _limit)
-                 '(("roman-nihon" 128 nil) ("nihon-tail" 110 nil)))))
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  '(("roman-nihon" 128 nil) ("nihon-tail" 110 nil))
+                  return-all-scores))))
       (let* ((candidates '("roman-nihon" "nihon-tail" "日本"))
              (regexp-pairs
               (nucleo-completion--regexp-filter-pairs
                "nihon" candidates))
-             (module-results
+             (bundle
               (nucleo-completion--module-results
-               "nihon" (mapcar #'car regexp-pairs) nil 0)))
+               "nihon" (mapcar #'car regexp-pairs) nil 0))
+             (module-results
+              (nucleo-completion--bundle-top-info bundle)))
         (should (equal (mapcar #'nucleo-completion--result-candidate
                                (nucleo-completion--merge-regexp-results
                                 regexp-pairs module-results))
@@ -539,14 +685,17 @@
   (let ((nucleo-completion-sort-ties-by-length t)
         (nucleo-completion-sort-ties-alphabetically nil))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
-               (lambda (needle candidates ignore-case by-length alphabetically limit)
+               (lambda (needle candidates ignore-case by-length alphabetically
+                               limit &optional return-all-scores)
                  (should (equal needle "alp"))
                  (should (equal candidates '("alphabet" "alpha" "alpaca")))
                  (should-not ignore-case)
                  (should by-length)
                  (should-not alphabetically)
                  (should (= limit 0))
-                 '(("alpaca" 11 nil) ("alpha" 10 nil) ("alphabet" 10 nil)))))
+                 (nucleo-completion-tests--bundle
+                  '(("alpaca" 11 nil) ("alpha" 10 nil) ("alphabet" 10 nil))
+                  return-all-scores))))
       (should (equal (nucleo-completion--module-filter
                       "alp" '("alphabet" "alpha" "alpaca") nil)
                      '("alpaca" "alpha" "alphabet"))))))
@@ -555,14 +704,17 @@
   (let ((nucleo-completion-sort-ties-by-length nil)
         (nucleo-completion-sort-ties-alphabetically t))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
-               (lambda (needle candidates ignore-case by-length alphabetically limit)
+               (lambda (needle candidates ignore-case by-length alphabetically
+                               limit &optional return-all-scores)
                  (should (equal needle "a"))
                  (should (equal candidates '("beta" "alpha" "aardvark")))
                  (should-not ignore-case)
                  (should-not by-length)
                  (should alphabetically)
                  (should (= limit 0))
-                 '(("alpha" 10 nil) ("beta" 10 nil) ("aardvark" 9 nil)))))
+                 (nucleo-completion-tests--bundle
+                  '(("alpha" 10 nil) ("beta" 10 nil) ("aardvark" 9 nil))
+                  return-all-scores))))
       (should (equal (nucleo-completion--module-filter
                       "a" '("beta" "alpha" "aardvark") nil)
                      '("alpha" "beta" "aardvark"))))))
@@ -571,15 +723,18 @@
   (let ((nucleo-completion-sort-ties-by-length t)
         (nucleo-completion-sort-ties-alphabetically t))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
-               (lambda (needle candidates ignore-case by-length alphabetically limit)
+               (lambda (needle candidates ignore-case by-length alphabetically
+                               limit &optional return-all-scores)
                  (should (equal needle "a"))
                  (should (equal candidates '("bbb" "aa" "ccc" "aaa")))
                  (should-not ignore-case)
                  (should by-length)
                  (should alphabetically)
                  (should (= limit 0))
-                 '(("aa" 10 nil) ("aaa" 10 nil)
-                   ("bbb" 10 nil) ("ccc" 10 nil)))))
+                 (nucleo-completion-tests--bundle
+                  '(("aa" 10 nil) ("aaa" 10 nil)
+                    ("bbb" 10 nil) ("ccc" 10 nil))
+                  return-all-scores))))
       (should (equal (nucleo-completion--module-filter
                       "a" '("bbb" "aa" "ccc" "aaa") nil)
                      '("aa" "aaa" "bbb" "ccc"))))))
@@ -588,15 +743,19 @@
   (let ((nucleo-completion-sort-ties-by-length t)
         (nucleo-completion-sort-ties-alphabetically t))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
-               (lambda (needle candidates ignore-case by-length alphabetically limit)
+               (lambda (needle candidates ignore-case by-length alphabetically
+                               limit &optional return-all-scores)
                  (should (equal needle "a"))
                  (should (equal candidates '("bbb" "aa" "ccc" "aaa")))
                  (should-not ignore-case)
                  (should by-length)
                  (should alphabetically)
                  (should (= limit 0))
-                 '(("aa" 10 nil) ("aaa" 10 nil)
-                   ("bbb" 10 nil) ("ccc" 10 nil)))))
+                 (should return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  '(("aa" 10 nil) ("aaa" 10 nil)
+                    ("bbb" 10 nil) ("ccc" 10 nil))
+                  return-all-scores))))
       (should (equal (nucleo-completion--module-filter-with-scores
                       "a" '("bbb" "aa" "ccc" "aaa") nil)
                      '(("aa" . 10) ("aaa" . 10)
@@ -648,8 +807,8 @@
                   (ensure-list
                    (get-text-property
                     0 'face
-                   (nucleo-completion--highlight-candidate
-                    "fb" (copy-sequence "foo-bar") 10 100)))))))
+                    (nucleo-completion--highlight-candidate
+                     "fb" (copy-sequence "foo-bar") 10 100)))))))
 
 (ert-deftest nucleo-completion-high-score-emphasis-precedes-match-face-test ()
   (let ((completion-ignore-case nil)
@@ -689,8 +848,11 @@
         (nucleo-completion-max-highlighted-completions 10))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle _candidates _ignore-case _by-length
-                                _alphabetically _limit)
-                 '(("foo" 100 (0 1)) ("fob" 50 (0 1))))))
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  '(("foo" 100 (0 1)) ("fob" 50 (0 1)))
+                  return-all-scores))))
       (let ((all (nucleo-completion-all-completions
                   "fo" '("foo" "fob" "bar"))))
         (should (equal (nucleo-completion-tests--plain all)
@@ -706,20 +868,28 @@
         (completion-lazy-hilit nil))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle _candidates _ignore-case _by-length
-                                _alphabetically _limit)
-                 '(("foo" 100 (0 1)) ("fob" 50 (0 1)))))
-              ((symbol-function 'nucleo-completion--score-table)
-               (lambda (_scored)
-                 (error "score table must not be built")))
-              ((symbol-function 'nucleo-completion--results->indices-table)
-               (lambda (_results)
-                 (error "indices table must not be built"))))
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  '(("foo" 100 (0 1)) ("fob" 50 (0 1)))
+                  return-all-scores)))
+              ((symbol-function 'nucleo-completion--top-info-hash)
+               (lambda (_top-info)
+                 (error "top-info hash must not be built")))
+              ((symbol-function 'nucleo-completion--full-scores-hash)
+               (lambda (_candidates _full-scores)
+                 (error "full-scores hash must not be built"))))
       (should (equal (nucleo-completion-tests--plain
                       (nucleo-completion-all-completions
                        "fo" '("foo" "fob" "bar")))
                      '("foo" "fob"))))))
 
-(ert-deftest nucleo-completion-lazy-highlight-computes-key-once-test ()
+(ert-deftest nucleo-completion-lazy-highlight-avoids-key-allocation-test ()
+  "Hash tables keyed on candidate strings rely on the `equal'
+test, which already compares string contents independently of
+text properties.  The lazy highlight lambda must therefore avoid
+allocating a stripped key with `substring-no-properties' on each
+invocation."
   (let ((completion-ignore-case nil)
         (completion-lazy-hilit t)
         (nucleo-completion-max-highlighted-completions 10)
@@ -727,8 +897,10 @@
     (defvar completion-lazy-hilit-fn)
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle _candidates _ignore-case _by-length
-                                _alphabetically _limit)
-                 '(("foo" 100 (0 1)))))
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle '(("foo" 100 (0 1)))
+                                                  return-all-scores)))
               ((symbol-function 'substring-no-properties)
                (lambda (string &optional start end)
                  (setq calls (1+ calls))
@@ -738,7 +910,7 @@
       (nucleo-completion-all-completions "fo" '("foo" "bar"))
       (setq calls 0)
       (funcall completion-lazy-hilit-fn (copy-sequence "foo"))
-      (should (= calls 1)))))
+      (should (= calls 0)))))
 
 (ert-deftest nucleo-completion-regexp-only-match-is-high-score-highlighted-test ()
   (let ((completion-ignore-case nil)
@@ -751,10 +923,13 @@
                    "日本")))))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
-                                _alphabetically _limit)
-                 (cl-loop for candidate in candidates
-                          when (string= candidate "roman-nihon")
-                          collect (list candidate 128 '(0 1))))))
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (nucleo-completion-tests--bundle
+                  (cl-loop for candidate in candidates
+                           when (string= candidate "roman-nihon")
+                           collect (list candidate 128 '(0 1)))
+                  return-all-scores))))
       (let* ((all (nucleo-completion-all-completions
                    "nihon" '("日本語" "roman-nihon")))
              (plain (nucleo-completion-tests--plain all))

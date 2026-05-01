@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use emacs::{defun, Env, IntoLisp, Result, Value};
@@ -40,7 +41,35 @@ fn case_matching(ignore_case: bool) -> CaseMatching {
 }
 
 thread_local! {
-    static MATCHER: RefCell<Matcher> = RefCell::new(Matcher::new(Config::DEFAULT.match_paths()));
+    /// Matcher cached on the main Emacs thread for serial scoring and
+    /// for the small post-sort indices pass.  Reused across module
+    /// invocations so that we do not pay for `Matcher::new` per call.
+    static MATCHER: RefCell<Matcher> =
+        RefCell::new(Matcher::new(Config::DEFAULT.match_paths()));
+}
+
+/// Persistent worker-thread matchers.
+///
+/// `thread::scope` spawns fresh OS threads on every parallel call, so
+/// a `thread_local` would re-run `Matcher::new` per scope.  We keep
+/// the matchers alive globally and let each worker borrow its
+/// dedicated slot via a `Mutex`.  No contention occurs because each
+/// worker is assigned a unique slot, but `Mutex` is required because
+/// `Matcher` is not `Sync`.
+static MATCHER_POOL: OnceLock<Vec<Mutex<Matcher>>> = OnceLock::new();
+
+fn matcher_pool() -> &'static [Mutex<Matcher>] {
+    MATCHER_POOL
+        .get_or_init(|| {
+            let n = thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .max(1);
+            (0..n)
+                .map(|_| Mutex::new(Matcher::new(Config::DEFAULT.match_paths())))
+                .collect()
+        })
+        .as_slice()
 }
 
 fn with_matcher<T>(function: impl FnOnce(&mut Matcher) -> T) -> T {
@@ -76,12 +105,8 @@ fn score_items_with_sort(
         );
     }
 
-    let workers = parallel_worker_count(
-        texts.len(),
-        thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1),
-    );
+    let pool = matcher_pool();
+    let workers = parallel_worker_count(texts.len(), pool.len());
 
     if workers == 1 {
         return sort_scored(
@@ -95,10 +120,14 @@ fn score_items_with_sort(
     let next_batch = AtomicUsize::new(0);
     let scored = thread::scope(|scope| {
         let mut handles = Vec::with_capacity(workers);
-        for _ in 0..workers {
+        for worker_idx in 0..workers {
             let next_batch = &next_batch;
+            let matcher_mutex = &pool[worker_idx];
             handles.push(scope.spawn(move || {
-                let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+                let mut guard = matcher_mutex
+                    .lock()
+                    .expect("nucleo matcher pool mutex poisoned");
+                let matcher: &mut Matcher = &mut *guard;
                 let mut scored = Vec::new();
                 loop {
                     let batch_index = next_batch.fetch_add(1, Ordering::Relaxed);
@@ -112,7 +141,7 @@ fn score_items_with_sort(
                         pattern,
                         &texts[start..end],
                         start,
-                        &mut matcher,
+                        matcher,
                     ));
                 }
                 scored
@@ -195,6 +224,16 @@ fn score_item_range(
         .collect()
 }
 
+/// Compute the highlight indices for one already-matched candidate.
+///
+/// `pattern.indices` re-runs the dynamic-programming match in order to
+/// record positions, but the call only happens for the at most
+/// `highlight_limit` top-ranked candidates and so its cost is bounded
+/// by a small constant (default 25) regardless of the candidate-set
+/// size.  Score and indices share the underlying algorithm; coalescing
+/// them into a single per-candidate call would force allocating a
+/// `Vec<u32>` for every match instead of just for the top-ranked few,
+/// so the deliberate two-phase shape is retained.
 fn matched_indices(pattern: &Pattern, text: &str, matcher: &mut Matcher) -> Option<Vec<u32>> {
     let mut buf = Vec::new();
     let mut indices = Vec::new();
@@ -212,15 +251,33 @@ fn indices_to_lisp<'e>(env: &'e Env, indices: Vec<u32>) -> Result<Value<'e>> {
     Ok(result)
 }
 
-fn result_entry_to_lisp<'e>(
+/// Ask Emacs whether new input is waiting.
+///
+/// The Emacs Lisp `input-pending-p` predicate is the standard way for
+/// modules to cooperate with `while-no-input`: when it returns non-nil
+/// we abandon the rest of the work and let the caller observe an empty
+/// bundle, which the Lisp wrapper interprets as "interrupt and reuse
+/// the previous filter result."  The check is cheap.
+fn input_pending(env: &Env) -> Result<bool> {
+    let args: [Value; 0] = [];
+    Ok(env.call("input-pending-p", &args)?.is_not_nil())
+}
+
+fn build_list_4<'e>(
     env: &'e Env,
-    candidate: Value<'e>,
-    score: u32,
-    indices: Value<'e>,
+    a: Value<'e>,
+    b: Value<'e>,
+    c: Value<'e>,
+    d: Value<'e>,
 ) -> Result<Value<'e>> {
     let nil = env.intern("nil")?;
-    let tail = env.cons(score.into_lisp(env)?, env.cons(indices, nil)?)?;
-    env.cons(candidate, tail)
+    env.cons(a, env.cons(b, env.cons(c, env.cons(d, nil)?)?)?)
+}
+
+fn empty_bundle<'e>(env: &'e Env) -> Result<Value<'e>> {
+    let nil = env.intern("nil")?;
+    // (CANDIDATES TOP-INFO FULL-SCORES) — final nil is the list terminator.
+    build_list_4(env, nil, nil, nil, nil)
 }
 
 #[defun]
@@ -232,7 +289,12 @@ fn candidates<'e>(
     sort_ties_by_length: Value<'e>,
     sort_ties_alphabetically: Value<'e>,
     highlight_limit: Value<'e>,
+    return_all_scores: Value<'e>,
 ) -> Result<Value<'e>> {
+    if input_pending(env)? {
+        return empty_bundle(env);
+    }
+
     let (values, texts) = collect_candidates(candidates)?;
     let ignore_case = ignore_case.is_not_nil();
     let pattern = Pattern::parse(&pattern, case_matching(ignore_case), Normalization::Smart);
@@ -245,25 +307,63 @@ fn candidates<'e>(
             ignore_case,
         },
     );
-    let highlight_limit = highlight_limit.into_rust::<usize>()?;
 
-    let mut result = env.intern("nil")?;
-    for (rank, scored) in matches.into_iter().enumerate().rev() {
-        let indices = if rank < highlight_limit {
-            match with_matcher(|matcher| matched_indices(&pattern, &texts[scored.index], matcher)) {
-                Some(indices) => indices_to_lisp(env, indices)?,
-                None => env.intern("nil")?,
-            }
-        } else {
-            env.intern("nil")?
-        };
-        result = env.cons(
-            result_entry_to_lisp(env, values[scored.index], scored.score, indices)?,
-            result,
-        )?;
+    if input_pending(env)? {
+        return empty_bundle(env);
     }
 
-    Ok(result)
+    let highlight_limit = highlight_limit.into_rust::<usize>()?;
+    let return_all_scores = return_all_scores.is_not_nil();
+    let nil = env.intern("nil")?;
+
+    // CANDIDATES: flat sorted list.  One cons per match (vs. the old
+    // shape that produced four cons cells per match for the outer list
+    // plus the (cand score indices) triple).
+    let mut candidates_list = nil;
+    for scored in matches.iter().rev() {
+        candidates_list = env.cons(values[scored.index], candidates_list)?;
+    }
+
+    // TOP-INFO: at most `highlight_limit` (CAND SCORE INDICES) entries.
+    // Indices are computed only here so non-top-N matches do not pay
+    // for index recording or for the extra allocation.
+    let top_n = matches.len().min(highlight_limit);
+    let mut top_info = nil;
+    for i in (0..top_n).rev() {
+        let scored = &matches[i];
+        let indices_value = match with_matcher(|matcher| {
+            matched_indices(&pattern, &texts[scored.index], matcher)
+        }) {
+            Some(indices) => indices_to_lisp(env, indices)?,
+            None => nil,
+        };
+        // (cand score indices-list)
+        let entry = env.cons(
+            values[scored.index],
+            env.cons(scored.score.into_lisp(env)?, env.cons(indices_value, nil)?)?,
+        )?;
+        top_info = env.cons(entry, top_info)?;
+    }
+
+    // FULL-SCORES: parallel-to-CANDIDATES list, populated only when
+    // the caller asks for it (lazy-hilit + score-band path).  Default
+    // off so the common eager and no-score-band cases pay no extra
+    // cons cells for per-candidate scores.
+    let full_scores = if return_all_scores {
+        let mut alist = nil;
+        for scored in matches.iter().rev() {
+            alist = env.cons(scored.score.into_lisp(env)?, alist)?;
+        }
+        alist
+    } else {
+        nil
+    };
+
+    let nil_terminator = env.intern("nil")?;
+    env.cons(
+        candidates_list,
+        env.cons(top_info, env.cons(full_scores, nil_terminator)?)?,
+    )
 }
 
 #[cfg(test)]
