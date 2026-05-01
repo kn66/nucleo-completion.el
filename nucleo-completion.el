@@ -60,12 +60,13 @@ function list, `completion-ignore-case', and `default-directory'."
                  (natnum :tag "Maximum cached entries"))
   :group 'nucleo-completion)
 
-(defcustom nucleo-completion-long-candidate-threshold 4096
+(defcustom nucleo-completion-long-candidate-threshold nil
   "Maximum candidate length to score with the Rust module.
 Candidates longer than this number of characters are filtered but
 not scored.  Long matching candidates are appended after scored
 matches in their original order.  Set this to nil to score every
-candidate regardless of length.
+candidate regardless of length, which avoids an Emacs Lisp
+pre-scan over every candidate before each module call.
 
 This value also acts as the default ceiling for regexp expander
 matching and match highlighting when

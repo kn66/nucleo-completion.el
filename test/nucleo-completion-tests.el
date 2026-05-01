@@ -173,6 +173,7 @@ populated when RETURN-ALL-SCORES is non-nil."
                 (nucleo-completion--exact-word-regexps "foo bar")))))
 
 (ert-deftest nucleo-completion-long-candidate-threshold-sanitizes-test ()
+  (should-not (nucleo-completion--long-candidate-threshold))
   (let ((nucleo-completion-long-candidate-threshold 3))
     (should (= (nucleo-completion--long-candidate-threshold) 3)))
   (let ((nucleo-completion-long-candidate-threshold nil))
