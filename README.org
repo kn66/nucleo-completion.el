@@ -166,6 +166,11 @@ highlighted characters track the same match that produced the score without an
 extra module call per candidate.  If the module is unavailable, the package
 falls back to the simple Emacs Lisp subsequence highlighter.
 
+For an external benchmark comparison, see
+[[https://github.com/kn66/emacs-completion-bench][emacs-completion-bench]].
+It includes results for ~nucleo~ alongside other Emacs completion styles such
+as ~hotfuzz~, ~fussy~, ~orderless~, and ~flex~.
+
 Tie sorting with ~nucleo-completion-sort-ties-by-length~ and
 ~nucleo-completion-sort-ties-alphabetically~ is handled by the Rust module.
 If the module is unavailable, the package uses the simple Emacs Lisp fallback
