@@ -213,6 +213,23 @@ Each entry has the form (FILE . MESSAGE).")
   (file-name-directory (or load-file-name byte-compile-current-file buffer-file-name))
   "Directory containing nucleo-completion.el.")
 
+(defun nucleo-completion--nonnegative-integer-or-nil (value)
+  "Return VALUE when it is a nonnegative integer, otherwise nil."
+  (when (and (integerp value) (>= value 0))
+    value))
+
+(defun nucleo-completion--cached (cache key producer)
+  "Return CACHE value for KEY, computing it with PRODUCER when absent.
+When CACHE is not a hash table, call PRODUCER without caching."
+  (if (hash-table-p cache)
+      (let ((cached (gethash key cache :missing)))
+        (if (not (eq cached :missing))
+            cached
+          (let ((value (funcall producer)))
+            (puthash key value cache)
+            value)))
+    (funcall producer)))
+
 (defun nucleo-completion--string-key (string)
   "Return STRING unchanged.
 Hash tables that key on candidate strings use the `equal' test,
@@ -283,16 +300,14 @@ function is a no-op."
 
 (defun nucleo-completion--highlight-limit ()
   "Return a sanitized value for eager or module highlight limits."
-  (if (and (integerp nucleo-completion-max-highlighted-completions)
-           (>= nucleo-completion-max-highlighted-completions 0))
-      nucleo-completion-max-highlighted-completions
-    0))
+  (or (nucleo-completion--nonnegative-integer-or-nil
+       nucleo-completion-max-highlighted-completions)
+      0))
 
 (defun nucleo-completion--long-candidate-threshold ()
   "Return sanitized long-candidate scoring threshold, or nil."
-  (when (and (integerp nucleo-completion-long-candidate-threshold)
-             (>= nucleo-completion-long-candidate-threshold 0))
-    nucleo-completion-long-candidate-threshold))
+  (nucleo-completion--nonnegative-integer-or-nil
+   nucleo-completion-long-candidate-threshold))
 
 (defun nucleo-completion--long-candidate-p (candidate)
   "Return non-nil when CANDIDATE should skip module scoring."
@@ -304,12 +319,10 @@ function is a no-op."
   "Return sanitized long-candidate regexp threshold, or nil.
 When the user setting is the symbol `inherit', the value is
 resolved from `nucleo-completion-long-candidate-threshold'."
-  (let ((value (if (eq nucleo-completion-long-candidate-regexp-threshold
-                       'inherit)
-                   nucleo-completion-long-candidate-threshold
-                 nucleo-completion-long-candidate-regexp-threshold)))
-    (when (and (integerp value) (>= value 0))
-      value)))
+  (nucleo-completion--nonnegative-integer-or-nil
+   (if (eq nucleo-completion-long-candidate-regexp-threshold 'inherit)
+       nucleo-completion-long-candidate-threshold
+     nucleo-completion-long-candidate-regexp-threshold)))
 
 (defun nucleo-completion--long-candidate-regexp-p (candidate)
   "Return non-nil when CANDIDATE should skip regexp expanders."
@@ -321,12 +334,10 @@ resolved from `nucleo-completion-long-candidate-threshold'."
   "Return sanitized long-candidate highlight threshold, or nil.
 When the user setting is the symbol `inherit', the value is
 resolved from `nucleo-completion-long-candidate-threshold'."
-  (let ((value (if (eq nucleo-completion-long-candidate-highlight-threshold
-                       'inherit)
-                   nucleo-completion-long-candidate-threshold
-                 nucleo-completion-long-candidate-highlight-threshold)))
-    (when (and (integerp value) (>= value 0))
-      value)))
+  (nucleo-completion--nonnegative-integer-or-nil
+   (if (eq nucleo-completion-long-candidate-highlight-threshold 'inherit)
+       nucleo-completion-long-candidate-threshold
+     nucleo-completion-long-candidate-highlight-threshold)))
 
 (defun nucleo-completion--long-candidate-highlight-p (candidate)
   "Return non-nil when CANDIDATE should skip match highlighting."
@@ -368,26 +379,17 @@ resolved from `nucleo-completion-long-candidate-threshold'."
 
 (defun nucleo-completion--terms (pattern)
   "Split PATTERN into non-empty whitespace-separated terms."
-  (if (hash-table-p nucleo-completion--terms-cache)
-      (let ((cached (gethash pattern nucleo-completion--terms-cache :missing)))
-        (if (not (eq cached :missing))
-            cached
-          (let ((terms (split-string pattern "[[:space:]]+" t)))
-            (puthash pattern terms nucleo-completion--terms-cache)
-            terms)))
-    (split-string pattern "[[:space:]]+" t)))
+  (nucleo-completion--cached
+   nucleo-completion--terms-cache
+   pattern
+   (lambda () (split-string pattern "[[:space:]]+" t))))
 
 (defun nucleo-completion--subsequence-regexp (needle)
   "Return a fuzzy subsequence regexp for NEEDLE."
-  (if (hash-table-p nucleo-completion--subsequence-regexp-cache)
-      (let ((cached (gethash needle nucleo-completion--subsequence-regexp-cache
-                             :missing)))
-        (if (not (eq cached :missing))
-            cached
-          (let ((regexp (nucleo-completion--subsequence-regexp-1 needle)))
-            (puthash needle regexp nucleo-completion--subsequence-regexp-cache)
-            regexp)))
-    (nucleo-completion--subsequence-regexp-1 needle)))
+  (nucleo-completion--cached
+   nucleo-completion--subsequence-regexp-cache
+   needle
+   (lambda () (nucleo-completion--subsequence-regexp-1 needle))))
 
 (defun nucleo-completion--subsequence-regexp-1 (needle)
   "Return an uncached fuzzy subsequence regexp for NEEDLE."
@@ -409,14 +411,10 @@ resolved from `nucleo-completion-long-candidate-threshold'."
 
 (defun nucleo-completion--regexp-function-regexps (term)
   "Return extra regexps produced for TERM."
-  (if (hash-table-p nucleo-completion--regexp-cache)
-      (let ((cached (gethash term nucleo-completion--regexp-cache :missing)))
-        (if (not (eq cached :missing))
-            cached
-          (let ((regexps (nucleo-completion--regexp-function-regexps-1 term)))
-            (puthash term regexps nucleo-completion--regexp-cache)
-            regexps)))
-    (nucleo-completion--regexp-function-regexps-1 term)))
+  (nucleo-completion--cached
+   nucleo-completion--regexp-cache
+   term
+   (lambda () (nucleo-completion--regexp-function-regexps-1 term))))
 
 (defun nucleo-completion--regexp-function-regexps-1 (term)
   "Return persistent-cached extra regexps produced for TERM."
@@ -442,7 +440,8 @@ resolved from `nucleo-completion-long-candidate-threshold'."
 
 (defun nucleo-completion--persistent-regexp-cache-limit ()
   "Return sanitized persistent regexp cache size, or nil when disabled."
-  (when (and (integerp nucleo-completion-persistent-regexp-cache-size)
+  (when (and (nucleo-completion--nonnegative-integer-or-nil
+              nucleo-completion-persistent-regexp-cache-size)
              (> nucleo-completion-persistent-regexp-cache-size 0))
     nucleo-completion-persistent-regexp-cache-size))
 
@@ -924,15 +923,10 @@ entries to keep the parallel-array invariant."
 
 (defun nucleo-completion--exact-word-regexps (needle)
   "Return regexps that match NEEDLE terms as complete words."
-  (if (hash-table-p nucleo-completion--exact-word-regexp-cache)
-      (let ((cached (gethash needle nucleo-completion--exact-word-regexp-cache
-                             :missing)))
-        (if (not (eq cached :missing))
-            cached
-          (let ((regexps (nucleo-completion--exact-word-regexps-1 needle)))
-            (puthash needle regexps nucleo-completion--exact-word-regexp-cache)
-            regexps)))
-    (nucleo-completion--exact-word-regexps-1 needle)))
+  (nucleo-completion--cached
+   nucleo-completion--exact-word-regexp-cache
+   needle
+   (lambda () (nucleo-completion--exact-word-regexps-1 needle))))
 
 (defun nucleo-completion--exact-word-regexps-1 (needle)
   "Return uncached regexps that match NEEDLE terms as complete words."
