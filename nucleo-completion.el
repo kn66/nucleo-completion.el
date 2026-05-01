@@ -109,6 +109,20 @@ a positive integer to override the inherited threshold."
                  (natnum :tag "Maximum highlighted candidate length"))
   :group 'nucleo-completion)
 
+(defcustom nucleo-completion-scrub-non-unicode-candidates nil
+  "Whether to strip non-Unicode codepoints before calling the Rust module.
+Some frontends append disambiguation characters above Unicode's
+maximum codepoint to completion candidates.  The Rust module
+cannot encode those characters as UTF-8, so enabling this option
+walks every candidate, sends scrubbed copies to Rust when needed,
+and restores the original strings on return.
+
+Keep this nil when candidates are ordinary Unicode strings.  It
+avoids an extra Emacs Lisp scan over every candidate before each
+module call."
+  :type 'boolean
+  :group 'nucleo-completion)
+
 (defcustom nucleo-completion-sort-ties-by-length nil
   "Whether to sort equal-scoring Nucleo matches by candidate length.
 When non-nil, shorter candidates come first.  This only affects
@@ -698,9 +712,12 @@ whose codepoints exceed Unicode's maximum, which the Rust module
 cannot encode as UTF-8.  Such candidates are scrubbed of those
 characters before being passed to the module and the original
 candidate strings are restored on the way back so their text
-properties (Consult metadata, invisibility, faces) survive."
+properties (Consult metadata, invisibility, faces) survive when
+`nucleo-completion-scrub-non-unicode-candidates' is non-nil."
   (pcase-let* ((`(,cleaned . ,map)
-                (nucleo-completion--scrub-candidates candidates))
+                (if nucleo-completion-scrub-non-unicode-candidates
+                    (nucleo-completion--scrub-candidates candidates)
+                  (cons candidates nil)))
                (bundle
                 (if (nucleo-completion--module-supports-bundle-p)
                     (nucleo-completion-candidates

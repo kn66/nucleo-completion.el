@@ -140,6 +140,13 @@ Candidates longer than ~nucleo-completion-long-candidate-highlight-threshold~
 characters skip match highlighting.  Set the option to nil to highlight every
 candidate regardless of length.
 
+By default, candidates are sent to the Rust module as-is.  If your completion
+frontend appends disambiguation characters above Unicode's maximum codepoint,
+enable ~nucleo-completion-scrub-non-unicode-candidates~ to strip those
+characters before the module call and restore the original candidates
+afterwards.  Keeping it disabled avoids an extra Emacs Lisp scan over every
+candidate in ordinary completion tables.
+
 Regexp expanders configured with ~nucleo-completion-regexp-functions~ are cached
 for the duration of each completion pass.  This avoids repeatedly invoking slow
 expanders while deciding whether expansion is needed, filtering candidates, and

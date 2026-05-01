@@ -197,6 +197,13 @@ filter/sort 済み候補リストとして使うだけにし、追加の hash ta
 lazy highlight では候補文字列の property-free key を一度だけ作り、score と indices
 の lookup に再利用する。
 
+~nucleo-completion-scrub-non-unicode-candidates~ が nil の場合、Rust module に
+候補を渡す前の non-Unicode codepoint 走査は行わない。通常の completion table は
+Unicode 文字列だけを含むため、この既定値により Emacs Lisp 側で候補全文をもう一度
+走査するコストを避ける。Consult などの frontend が Unicode 上限を超える
+disambiguation 文字を候補へ付与する環境では、この option を non-nil にすることで
+従来通り scrubbed copy を module に渡し、戻り値では元の candidate object を復元する。
+
 score-band highlight が有効な場合、high-score 判定で使う単語完全一致 regexp も
 completion pass ごとに cache する。同じ needle の上位候補を複数 highlight しても、
 term ごとの regexp 文字列を候補ごとに組み立て直さない。

@@ -139,6 +139,7 @@ populated when RETURN-ALL-SCORES is non-nil."
                       nucleo-completion-long-candidate-threshold
                       nucleo-completion-long-candidate-regexp-threshold
                       nucleo-completion-long-candidate-highlight-threshold
+                      nucleo-completion-scrub-non-unicode-candidates
                       nucleo-completion-sort-ties-by-length
                       nucleo-completion-sort-ties-alphabetically
                       nucleo-completion-highlight-score-bands
@@ -266,6 +267,7 @@ populated when RETURN-ALL-SCORES is non-nil."
   "Tofu-bearing candidates round-trip through the module unchanged."
   (let* ((tofu (string #x200003))
          (consult-cand (concat "abc-def" tofu))
+         (nucleo-completion-scrub-non-unicode-candidates t)
          (received-input nil))
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
@@ -289,6 +291,7 @@ populated when RETURN-ALL-SCORES is non-nil."
          (tofu-b (string #x200005))
          (cand-a (concat "same" tofu-a))
          (cand-b (concat "same" tofu-b))
+         (nucleo-completion-scrub-non-unicode-candidates t)
          received-input)
     (cl-letf (((symbol-function 'nucleo-completion-candidates)
                (lambda (_needle candidates _ignore-case _by-length
@@ -307,6 +310,25 @@ populated when RETURN-ALL-SCORES is non-nil."
         (should (eq (cadr returned) cand-b))
         (should (eq (caar top-info) cand-a))
         (should (eq (caadr top-info) cand-b))))))
+
+(ert-deftest nucleo-completion-module-results-skips-scrub-by-default-test ()
+  "Ordinary module calls avoid the per-candidate scrub scan by default."
+  (let ((nucleo-completion-scrub-non-unicode-candidates nil))
+    (cl-letf (((symbol-function 'nucleo-completion--scrub-candidates)
+               (lambda (_candidates)
+                 (error "scrub should not run")))
+              ((symbol-function 'nucleo-completion-candidates)
+               (lambda (_needle candidates _ignore-case _by-length
+                                _alphabetically _limit
+                                &optional return-all-scores)
+                 (should (equal candidates '("foo" "bar")))
+                 (nucleo-completion-tests--bundle
+                  '(("foo" 100 nil) ("bar" 90 nil))
+                  return-all-scores))))
+      (should (equal (nucleo-completion--bundle-candidates
+                      (nucleo-completion--module-results
+                       "f" '("foo" "bar") nil 0))
+                     '("foo" "bar"))))))
 
 (ert-deftest nucleo-completion-split-scored-candidates-test ()
   (let ((nucleo-completion-long-candidate-threshold 3))
