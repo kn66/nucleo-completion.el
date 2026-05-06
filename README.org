@@ -68,7 +68,7 @@ explicit confirmation prompt, verifies the published SHA256 checksum, stores the
 module under ~nucleo-completion-module-directory~, and then tries to load it.
 No download happens during package installation or by default when the package
 is loaded.  By default, the command uses GitHub's latest release URL.  Set
-~nucleo-completion-module-release-tag~ to a tag string such as ~"v0.1.8"~ to
+~nucleo-completion-module-release-tag~ to a tag string such as ~"v0.1.9"~ to
 download from a fixed release instead.
 
 If you want ~nucleo-completion~ to ask once when loaded interactively and no
