@@ -639,6 +639,75 @@ populated when RETURN-ALL-SCORES is non-nil."
     (should (equal (nucleo-completion-tests--plain all)
                    '("foo/bar" "bar/foo" "foobar")))))
 
+(ert-deftest nucleo-completion-flex-nospace-test ()
+  (let ((completion-flex-nospace t)
+        (completion-ignore-case nil)
+        (table '("foo/bar" "bar/foo" "foobar")))
+    (should-not (nucleo-completion-all-completions
+                 "foo bar" table nil 7))
+    (should-not (nucleo-completion-try-completion
+                 "foo bar" table nil 7))))
+
+(ert-deftest nucleo-completion-all-completions-after-point-test ()
+  (let* ((completion-styles '(nucleo))
+         (table '("foo-bar" "foo-baz" "bar-foo"))
+         (md (completion-metadata "fo-b" table nil))
+         (all (completion-all-completions "fo-b" table nil 2 md)))
+    (setcdr (last all) nil)
+    (should (equal (nucleo-completion-tests--plain all)
+                   '("foo-bar" "foo-baz")))))
+
+(ert-deftest nucleo-completion-try-space-separated-test ()
+  (let* ((completion-styles '(nucleo))
+         (table '("foo/bar" "bar/foo" "foobar" "foo-qux" "bar-baz"))
+         (md (completion-metadata "foo bar" table nil)))
+    (should (equal (completion-try-completion "foo bar" table nil 7 md)
+                   '("foo bar" . 7)))))
+
+(ert-deftest nucleo-completion-try-after-point-filter-test ()
+  (let* ((completion-styles '(nucleo))
+         (table '("foo-qux-bar" "foo-qux-zap" "bar-foo-qux"))
+         (md (completion-metadata "fo qux-b" table nil)))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p)
+               (lambda () nil)))
+      (should (equal (completion-try-completion "fo qux-b" table nil 6 md)
+                     '("foo-qux-bar" . 11))))))
+
+(ert-deftest nucleo-completion-try-exact-after-point-test ()
+  "Keep standard exact-match semantics when only point could move."
+  (let* ((completion-styles '(nucleo))
+         (table '("foo"))
+         (md (completion-metadata "foo" table nil)))
+    (should (eq (completion-try-completion "foo" table nil 2 md)
+                t))))
+
+(ert-deftest nucleo-completion-try-table-terminator-test ()
+  "Honor table-native `try-completion' finalization such as terminators."
+  (let* ((completion-styles '(nucleo))
+         (table (apply-partially #'completion-table-with-terminator
+                                 "/"
+                                 '("foo")))
+         (md (completion-metadata "foo" table nil)))
+    (should (equal (completion-try-completion "foo" table nil 3 md)
+                   '("foo/" . 4))))
+  (let* ((completion-styles '(nucleo))
+         (table (apply-partially #'completion-table-with-terminator
+                                 "/"
+                                 '("foo-bar")))
+         (md (completion-metadata "fb" table nil)))
+    (should (equal (completion-try-completion "fb" table nil 2 md)
+                   '("foo-bar/" . 8)))))
+
+(ert-deftest nucleo-completion-try-table-terminator-after-point-test ()
+  "Merge a table terminator with matching text already after point."
+  (let* ((completion-styles '(nucleo))
+         (table (apply-partially #'completion-table-with-terminator
+                                 "/"
+                                 '("foo")))
+         (md (completion-metadata "fo/" table nil)))
+    (should (equal (completion-try-completion "fo/" table nil 2 md)
+                   '("foo/" . 4)))))
+
 (ert-deftest nucleo-completion-regexp-function-test ()
   (let ((nucleo-completion-regexp-functions
          (list (lambda (term)
@@ -654,6 +723,26 @@ populated when RETURN-ALL-SCORES is non-nil."
                     (nucleo-completion-all-completions
                      "nihon go" '("日本語" "nihon-go" "英語" "日本史")))
                    '("日本語" "nihon-go")))))
+
+(ert-deftest nucleo-completion-try-regexp-function-test ()
+  (let* ((completion-styles '(nucleo))
+         (nucleo-completion-regexp-functions
+          (list (lambda (term)
+                  (when (string= term "nihon")
+                    "日本"))))
+         (table '("日本語" "nihon-go"))
+         (md (completion-metadata "nihon" table nil)))
+    (should (equal (completion-try-completion "nihon" table nil 5 md)
+                   '("nihon" . 5))))
+  (let* ((completion-styles '(nucleo))
+         (nucleo-completion-regexp-functions
+          (list (lambda (term)
+                  (when (string= term "nihon")
+                    "日本"))))
+         (table '("日本語"))
+         (md (completion-metadata "nihon" table nil)))
+    (should (equal (completion-try-completion "nihon" table nil 5 md)
+                   '("日本語" . 3)))))
 
 (ert-deftest nucleo-completion-regexp-function-list-and-invalid-test ()
   (let ((nucleo-completion-regexp-functions

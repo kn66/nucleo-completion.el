@@ -168,6 +168,21 @@ highlighting matches.  When the Rust module is available, Nucleo fuzzy matching
 runs before the Elisp regexp filter, and regexp matching is only applied to
 candidates that were not already accepted by the module.
 
+Completion attempts such as ~TAB~ use the same expander-aware candidate set as
+candidate listing.  If multiple expander or space-separated matches exist but
+there is no common text to insert, Emacs keeps the current input instead of
+reporting no match.  Text after point is also honored when it is still inside
+the same completion boundary, matching Emacs' built-in completion behavior.
+Before returning a completion attempt, ~nucleo-completion~ also lets the
+completion table's own ~try-completion~ finalize the result, preserving standard
+table behavior such as terminators and suffix merging.  If that finalization
+would only move point without changing completion text, exact-match semantics
+are preserved.
+
+If Emacs' built-in ~completion-flex-nospace~ is non-nil, ~nucleo~ follows
+~flex~ and declines inputs containing spaces.  This lets later entries in
+~completion-styles~ handle those inputs.
+
 For expensive expanders that return stable results, such as a simple
 ~migemo-get-pattern~ wrapper, ~nucleo-completion-persistent-regexp-cache-size~
 can cache expander results across completion passes.  Keep it disabled when an
