@@ -2,6 +2,16 @@
 
 (require 'ert)
 (require 'cl-lib)
+(eval-and-compile
+  (let ((file (or load-file-name
+                  (and (boundp 'byte-compile-current-file)
+                       byte-compile-current-file)
+                  buffer-file-name)))
+    (when file
+      (add-to-list 'load-path
+                   (file-name-directory
+                    (directory-file-name
+                     (file-name-directory file)))))))
 (require 'nucleo-completion)
 
 ;;; Code:
