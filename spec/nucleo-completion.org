@@ -63,6 +63,14 @@ load 時には network access を行わない。すでに Rust module が curren
 で loaded の場合も installed file は更新するが、loaded module は差し替えず、次回
 Emacs 起動後に新しい module を使う。
 
+設定ファイルから明示的に自動 install したいユーザー向けに、
+~nucleo-completion-ensure-module~ を提供する。この関数は module API が既に使える場合は
+何もせず、未ロードの場合は既存 search path から module load を試みる。それでも
+module API が使えない場合は ~nucleo-completion-install-module~ を呼び、現在の
+platform 向け prebuilt module を install する。Lisp から呼ばれた場合は、設定に
+書いたことを明示 opt-in とみなして確認なしで install する。~M-x~ から呼ばれた場合は
+download や置き換え前に確認する。
+
 ** Custom Variables
 
 - ~nucleo-completion-max-highlighted-completions~

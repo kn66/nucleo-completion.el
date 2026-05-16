@@ -3,12 +3,13 @@
 ~nucleo-completion~ is an Emacs completion style backed by a Rust dynamic
 module using the ~nucleo-matcher~ crate.
 
+It also works without the Rust module by falling back to a simple Emacs Lisp
+subsequence matcher.
+
 * Screenshots
 :PROPERTIES:
 :ID:       d19e9b9a-6320-4076-a611-8e7dd6fd12bb
 :END:
-
-
 
 #+DOWNLOADED: screenshot @ 2026-04-26 08:10:52
 [[file:Screenshots/2026-04-26_08-10-52_screenshot.png]]
@@ -39,6 +40,26 @@ Then enable the completion style:
   (add-to-list 'completion-styles 'nucleo)
 #+end_src
 
+Or configure it with ~use-package~:
+
+#+begin_src emacs-lisp
+  (use-package nucleo-completion
+    :vc (:url "https://github.com/kn66/nucleo-completion.el.git"
+         :rev :newest)
+    :config
+    ;; Optional: install and load the Rust module when it is missing.
+    (nucleo-completion-ensure-module)
+
+    (setopt completion-styles '(nucleo basic))
+    (add-to-list 'completion-category-overrides
+                 '(eglot-capf (styles nucleo basic)))
+
+    (setopt nucleo-completion-sort-ties-by-length t
+            nucleo-completion-sort-ties-alphabetically t
+            nucleo-completion-sort-ties-by-history t
+            nucleo-completion-highlight-score-bands t))
+#+end_src
+
 The package works without a Rust dynamic module by using a simple Emacs Lisp
 fallback matcher.  The fallback filters candidates but does not apply
 Rust-backed scoring or tie sorting.
@@ -53,32 +74,39 @@ To use a local checkout, add the package directory to ~load-path~:
 
 * Rust Dynamic Module
 
-The MELPA package does not include prebuilt binary modules.  Users who want
-Rust-backed scoring can either download a prebuilt module for their own platform
-or build it locally.
+The Rust module is optional.  It enables Nucleo scoring, tie sorting, and
+score-aware highlighting; without it, candidates are filtered by the Emacs Lisp
+fallback.
 
-To download a prebuilt module from GitHub Releases, run:
+The MELPA package does not include prebuilt binary modules.  To install a
+module for the current platform from GitHub Releases, run:
 
 #+begin_src text
   M-x nucleo-completion-install-module
 #+end_src
 
-This command downloads only the module for the current platform after an
-explicit confirmation prompt, verifies the published SHA256 checksum, stores the
-module under ~nucleo-completion-module-directory~, and then tries to load it.
-If a Rust module is already loaded in the current Emacs process, the command
-still updates the installed file but leaves the loaded module unchanged; restart
-Emacs to use the newly installed module.
-No download happens during package installation or by default when the package
-is loaded.  By default, the command uses GitHub's latest release URL.  Set
-~nucleo-completion-module-release-tag~ to a tag string such as ~"v0.1.11"~ to
-download from a fixed release instead.
+The command asks before downloading, verifies the published SHA256 checksum,
+stores the file under ~nucleo-completion-module-directory~, and tries to load
+it.  No download happens during package installation or ordinary package load.
+If a module was already loaded in the current Emacs process, restart Emacs to
+use the newly installed file.
 
-If you want ~nucleo-completion~ to ask once when loaded interactively and no
-module is available, set this before loading the package:
+To opt in to automatic install from your configuration, call:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-install-policy 'prompt)
+  (nucleo-completion-ensure-module)
+#+end_src
+
+This first tries to load an already installed module.  If no module is
+available, it downloads and installs the prebuilt module for the current
+platform.  Lisp calls install without asking;
+~M-x nucleo-completion-ensure-module~ asks before downloading.
+
+By default, the installer uses GitHub's latest release URL.  To pin a release,
+set ~nucleo-completion-module-release-tag~ before installing:
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-module-release-tag "v0.1.11")
 #+end_src
 
 Check whether the Rust module loaded with:
@@ -92,8 +120,11 @@ saved in ~nucleo-completion-module-load-errors~.  Set
 ~nucleo-completion-report-module-load-errors~ before loading the package to also
 show those failures in ~*Messages*~.
 
-If the module is unavailable, the package still filters candidates with a simple
-Emacs Lisp subsequence matcher, but Rust-backed scoring is not applied.
+To ask once at interactive startup when no module is available, set:
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-module-install-policy 'prompt)
+#+end_src
 
 * Local Build
 
@@ -104,29 +135,24 @@ Emacs Lisp subsequence matcher, but Rust-backed scoring is not applied.
 The loader also checks ~target/release~ and ~target/debug~, so no extra
 ~load-path~ entry is required when building inside the package directory.
 
-* Prebuilt Release Assets
-
-This repository includes a GitHub Actions workflow at
-~.github/workflows/prebuilt-modules.yml~. It builds release artifacts for:
-
-- ~x86_64-unknown-linux-gnu~
-- ~x86_64-apple-darwin~ on ~macos-15-intel~
-- ~aarch64-apple-darwin~ on ~macos-15~
-- ~x86_64-pc-windows-msvc~
-
-Run the workflow manually from the GitHub Actions page with the release tag to
-publish. It builds the modules and uploads assets named
-~nucleo-completion-module-<target-triple>.<extension>~ plus matching
-~.sha256~ files to the selected GitHub Release.
-
-Linux binaries are sensitive to libc compatibility. For broad Linux
-distribution, consider adding a musl release asset.
-The loader also checks likely platform directories such as musl Linux,
-aarch64 Linux, and Windows GNU targets, but the workflow above only publishes
-the targets listed here unless the matrix is extended.
-
 Emacs must be built with dynamic module support. You can check this with
 ~(functionp 'module-load)~.
+
+* Prebuilt Release Assets
+
+The GitHub Actions workflow in ~.github/workflows/prebuilt-modules.yml~ builds
+release artifacts named
+~nucleo-completion-module-<target-triple>.<extension>~ plus matching
+~.sha256~ files for:
+
+- ~x86_64-unknown-linux-gnu~
+- ~x86_64-apple-darwin~
+- ~aarch64-apple-darwin~
+- ~x86_64-pc-windows-msvc~
+
+Run the workflow manually with the release tag to upload assets to an existing
+GitHub Release.  Linux binaries are sensitive to libc compatibility; for broad
+Linux distribution, consider adding a musl release asset.
 
 * Specification
 
@@ -135,81 +161,25 @@ Behavior and verification details are maintained in
 
 * Performance
 
-The Rust module scores large candidate sets in worker threads using fixed-size
-batches that idle workers pull dynamically.  On the Emacs side, filtering is
-wrapped in ~while-no-input~ so new keystrokes can interrupt an older,
-still-running filter pass while control is in Emacs Lisp.  The Rust module call
-itself is synchronous, so a very large candidate set can still occupy Emacs
-until that module call returns.
+The Rust module scores large candidate sets in worker threads using dynamic
+batches.  Emacs Lisp filtering is wrapped in ~while-no-input~ so newer
+keystrokes can interrupt stale completion passes while control is in Lisp; the
+module call itself is synchronous.
 
-Every candidate is scored by the Rust module without an Emacs Lisp length
-pre-scan.  This keeps the hot path simple and avoids routing long candidates
-through the slower fallback regexp filter.
-
-By default, candidates are sent to the Rust module as-is so ordinary completion
-tables avoid an extra Emacs Lisp scan over every candidate.  If the module
-rejects a candidate with a ~unicode-string-p~ error, Nucleo retries once with
-non-Unicode scrubbing enabled, restores the original candidates afterwards, and
-keeps that scrubbed path for later calls.  You can enable
-~nucleo-completion-scrub-non-unicode-candidates~ to use that path from the first
-call when your completion frontend is known to append disambiguation characters
-above Unicode's maximum codepoint.
-
-Regexp expanders configured with ~nucleo-completion-regexp-functions~ are cached
-for the duration of each completion pass.  This avoids repeatedly invoking slow
-expanders while deciding whether expansion is needed, filtering candidates, and
-highlighting matches.  When the Rust module is available, Nucleo fuzzy matching
-runs before the Elisp regexp-only filter, and regexp matching is only applied to
-candidates that were not already accepted by the module.  In that regexp-only
-pass, terms with configured regexp expansions do not rerun the fuzzy matcher
-that the module already handled.
-
-Very short regexp expansions can be disproportionately expensive.  By default,
-~nucleo-completion-regexp-functions~ is only called for terms with at least two
-characters, which avoids broad one-character Migemo patterns during commands such
-as ~consult-line~.  Set ~nucleo-completion-regexp-minimum-term-length~ to 1 when
-you want regexp expanders to run for single-character terms too.
-
-Completion attempts such as ~TAB~ use the same expander-aware candidate set as
-candidate listing.  If multiple expander or space-separated matches exist but
-there is no common text to insert, Emacs keeps the current input instead of
-reporting no match.  Text after point is also honored when it is still inside
-the same completion boundary, matching Emacs' built-in completion behavior.
-Before returning a completion attempt, ~nucleo-completion~ also lets the
-completion table's own ~try-completion~ finalize the result, preserving standard
-table behavior such as terminators and suffix merging.  If that finalization
-would only move point without changing completion text, exact-match semantics
-are preserved.
-
-If Emacs' built-in ~completion-flex-nospace~ is non-nil, ~nucleo~ follows
-~flex~ and declines inputs containing spaces.  This lets later entries in
-~completion-styles~ handle those inputs.
-
-The Rust module returns each candidate together with its score and the match
-indices chosen by ~nucleo-matcher~ for the top highlighted candidates, so the
-highlighted characters track the same match that produced the score without an
-extra module call per candidate.  If the module is unavailable, the package
-falls back to the simple Emacs Lisp subsequence highlighter.
+The module returns scores and match indices together, so highlighted characters
+track the same match that produced the score without one module call per
+candidate.  Regexp expander results are cached for each completion pass, and the
+default minimum expander term length is two characters to avoid broad
+one-character patterns.
 
 For an external benchmark comparison, see
 [[https://github.com/kn66/emacs-completion-bench][emacs-completion-bench]].
 It includes results for ~nucleo~ alongside other Emacs completion styles such
 as ~hotfuzz~, ~fussy~, ~orderless~, and ~flex~.
 
-Tie sorting with ~nucleo-completion-sort-ties-by-history~,
-~nucleo-completion-sort-ties-by-length~, and
-~nucleo-completion-sort-ties-alphabetically~ is handled by the Rust module.
-If the module is unavailable, the package uses the simple Emacs Lisp fallback
-filter instead.  The fallback only narrows candidates; it preserves input order
-and does not compute scores, apply tie sorting, or add score-band highlighting.
+* Configuration
 
-* Acknowledgements
-
-This package was inspired in part by ~hotfuzz~, ~fussy~, and ~fzf-native~.
-Their native scoring, threading, and interactive completion strategies informed
-the performance work here.
-
-* Tie Sorting
+** Tie Sorting
 
 By default, ~nucleo-completion~ keeps Nucleo's score order unchanged.  You can
 optionally refine candidates with the same Nucleo score:
@@ -232,7 +202,9 @@ Nucleo scores are not reordered.  History sorting only affects minibuffer
 completion with an active history variable; ordinary buffer completion keeps
 the Nucleo order unless the length or alphabetical tie-breakers apply.
 
-* Score Band Highlighting
+Tie sorting requires the Rust module.
+
+** Score Band Highlighting
 
 By default, ~nucleo-completion~ only highlights the matching parts of each
 candidate.  You can also highlight candidates by score band:
@@ -252,23 +224,20 @@ high-score candidates regardless of the ratio.  Other scored candidates use
 ~nucleo-completion-low-score-face~.  Customize
 ~nucleo-completion-high-score-face~ and ~nucleo-completion-low-score-face~ to
 change the visual style.  The default faces avoid background colors so they do
-not conflict with completion UI selection highlights or color themes.
-At runtime, invalid highlight counts are treated as 0 and score ratios are
-clamped to the 0.0 to 1.0 range, so accidental bad values do not break
-completion filtering.
+not conflict with completion UI selection highlights or color themes.  Score
+band highlighting requires the Rust module.
 
-* Regexp Expanders
+** Regexp Expanders
 
-~nucleo-completion-regexp-functions~ can add language-specific matchers such as
-Migemo. Each function receives one whitespace-separated search term and returns
-a regexp string, a list of regexp strings, or nil.
+~nucleo-completion-regexp-functions~ can add language-specific matchers.
+Each function receives one whitespace-separated search term and returns a
+regexp string, a list of regexp strings, or nil.
 Regexp expander results are cached for each completion pass, so user
 configuration normally does not need its own per-term cache.
-The default ~nucleo-completion-regexp-minimum-term-length~ is 2, so the examples
-below do not run Migemo/pyim expansion for one-character terms unless you lower
-that option.
+The default ~nucleo-completion-regexp-minimum-term-length~ is 2, so expanders do
+not run for one-character terms unless you lower that option.
 
-Migemo example:
+Japanese Migemo example:
 
 #+begin_src emacs-lisp
   (with-eval-after-load 'migemo
@@ -285,34 +254,7 @@ Migemo example:
                  #'my-nucleo-completion-migemo-regexp))
 #+end_src
 
-Complete ~use-package~ example with Migemo and Corfu:
-
-#+begin_src emacs-lisp
-  (use-package nucleo-completion
-    :vc ( :url "https://github.com/kn66/nucleo-completion.el.git"
-          :rev :newest)
-    :config
-    (setopt completion-styles '(nucleo basic))
-
-    (with-eval-after-load 'migemo
-      (defun my-nucleo-completion-migemo-regexp (term)
-        (when (not (string-empty-p term))
-          (let ((regexp (downcase (migemo-get-pattern term))))
-            (condition-case nil
-                (progn
-                  (string-match-p regexp "")
-                  regexp)
-              (invalid-regexp nil)))))
-
-      (add-to-list 'nucleo-completion-regexp-functions
-                   #'my-nucleo-completion-migemo-regexp))
-
-    (add-hook 'corfu-mode-hook
-              (lambda ()
-                (setq-local nucleo-completion-regexp-functions nil))))
-#+end_src
-
-pyim example:
+Chinese pyim example:
 
 #+begin_src emacs-lisp
   (with-eval-after-load 'pyim
@@ -333,6 +275,33 @@ pyim example:
                  #'my-nucleo-completion-pyim-regexp))
 #+end_src
 
+Latin accent example using Emacs' built-in character folding:
+
+#+begin_src emacs-lisp
+  (defun my-nucleo-completion-char-fold-regexp (term)
+    (when (and (fboundp 'char-fold-to-regexp)
+               (not (string-empty-p term)))
+      (let ((regexp (char-fold-to-regexp term)))
+        (condition-case nil
+            (progn
+              (string-match-p regexp "")
+              regexp)
+          (invalid-regexp nil)))))
+
+  (add-to-list 'nucleo-completion-regexp-functions
+               #'my-nucleo-completion-char-fold-regexp)
+#+end_src
+
+For other languages or input packages, register a small adapter:
+
+#+begin_src emacs-lisp
+  (defun my-nucleo-regexp (term)
+    ;; Return nil when TERM should not be handled by this backend.
+    (my-package-term-to-regexp term))
+
+  (add-to-list 'nucleo-completion-regexp-functions #'my-nucleo-regexp)
+#+end_src
+
 Terms are ANDed together. For each term, the built-in fuzzy subsequence matcher
 and configured regexp expanders are ORed together.
 
@@ -342,8 +311,8 @@ promoted before Nucleo-scored fuzzy matches.  When score-band highlighting is
 enabled, these regexp-only matches use the high-score face instead of being
 dimmed as low-score fuzzy matches.
 
-To keep ~nucleo~ scoring in Corfu but disable Migemo/pyim-style regexp expansion
-there, make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
+To keep ~nucleo~ scoring in Corfu while disabling Migemo/pyim expansion there,
+make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
 
 #+begin_src emacs-lisp
   (add-hook 'corfu-mode-hook
@@ -351,12 +320,8 @@ there, make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
               (setq-local nucleo-completion-regexp-functions nil)))
 #+end_src
 
-For other packages, write a small adapter:
+* Acknowledgements
 
-#+begin_src emacs-lisp
-  (defun my-nucleo-regexp (term)
-    ;; Return nil when TERM should not be handled by this backend.
-    (my-package-term-to-regexp term))
-
-  (add-to-list 'nucleo-completion-regexp-functions #'my-nucleo-regexp)
-#+end_src
+This package was inspired in part by ~hotfuzz~, ~fussy~, and ~fzf-native~.
+Their native scoring, threading, and interactive completion strategies informed
+the performance work here.

@@ -671,6 +671,33 @@ FORCE, replace an existing installed module."
         (when (file-exists-p checksum-temp)
           (delete-file checksum-temp))))))
 
+;;;###autoload
+(defun nucleo-completion-ensure-module (&optional force no-confirm)
+  "Ensure the Rust dynamic module is installed and loaded.
+If the module API is already available, do nothing.  Otherwise,
+try loading a module from the normal search paths.  If that still
+does not make the module API available, download and install a
+prebuilt module for the current platform.
+
+When called interactively, ask before downloading or replacing a
+module.  With prefix argument FORCE, replace an existing installed
+module.  Lisp calls install without confirmation because calling
+this function is an explicit opt-in; NO-CONFIRM non-nil also skips
+confirmation for wrapper commands.
+
+Return non-nil when the module API is available after the attempt."
+  (interactive "P")
+  (unless (nucleo-completion--module-ready-p)
+    (unless (nucleo-completion--dynamic-modules-supported-p)
+      (user-error "This Emacs was built without dynamic module support"))
+    (nucleo-completion--load-module)
+    (unless (nucleo-completion--module-ready-p)
+      (nucleo-completion-install-module
+       force
+       (or no-confirm
+           (not (called-interactively-p 'interactive))))))
+  (nucleo-completion--module-ready-p))
+
 (defun nucleo-completion--maybe-prompt-module-install ()
   "Prompt once to install the Rust module according to user policy."
   (when (and (eq nucleo-completion-module-install-policy 'prompt)
