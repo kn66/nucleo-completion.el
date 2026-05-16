@@ -331,6 +331,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((members (get 'nucleo-completion 'custom-group)))
     (dolist (symbol '(nucleo-completion-max-highlighted-completions
                       nucleo-completion-regexp-functions
+                      nucleo-completion-regexp-minimum-term-length
                       nucleo-completion-scrub-non-unicode-candidates
                       nucleo-completion-sort-ties-by-history
                       nucleo-completion-sort-ties-by-length
@@ -359,6 +360,14 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (should (= (nucleo-completion--highlight-limit) 0)))
   (let ((nucleo-completion-max-highlighted-completions 'invalid))
     (should (= (nucleo-completion--highlight-limit) 0))))
+
+(ert-deftest nucleo-completion-regexp-minimum-term-length-sanitizes-test ()
+  (let ((nucleo-completion-regexp-minimum-term-length 3))
+    (should (= (nucleo-completion--regexp-minimum-term-length) 3)))
+  (let ((nucleo-completion-regexp-minimum-term-length -1))
+    (should (= (nucleo-completion--regexp-minimum-term-length) 2)))
+  (let ((nucleo-completion-regexp-minimum-term-length 'invalid))
+    (should (= (nucleo-completion--regexp-minimum-term-length) 2))))
 
 (ert-deftest nucleo-completion-high-score-ratio-sanitizes-test ()
   (let ((nucleo-completion-high-score-ratio 0.5))
@@ -863,6 +872,41 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                     (nucleo-completion-all-completions
                      "jp lang" '("日本語" "日本史" "英語" "jp-lang")))
                    '("日本語" "jp-lang")))))
+
+(ert-deftest nucleo-completion-regexp-functions-skip-short-terms-test ()
+  (let ((nucleo-completion-tests--regexp-calls 0)
+        (nucleo-completion-regexp-minimum-term-length 2)
+        (nucleo-completion-regexp-functions
+         (list (lambda (_term)
+                 (setq nucleo-completion-tests--regexp-calls
+                       (1+ nucleo-completion-tests--regexp-calls))
+                 "日本"))))
+    (should-not (nucleo-completion--regexp-function-regexps "n"))
+    (should (= nucleo-completion-tests--regexp-calls 0))
+    (should (equal (nucleo-completion--regexp-function-regexps "ni")
+                   '("日本")))
+    (should (= nucleo-completion-tests--regexp-calls 1)))
+  (let ((nucleo-completion-tests--regexp-calls 0)
+        (nucleo-completion-regexp-minimum-term-length 1)
+        (nucleo-completion-regexp-functions
+         (list (lambda (_term)
+                 (setq nucleo-completion-tests--regexp-calls
+                       (1+ nucleo-completion-tests--regexp-calls))
+                 "日本"))))
+    (should (equal (nucleo-completion--regexp-function-regexps "n")
+                   '("日本")))
+    (should (= nucleo-completion-tests--regexp-calls 1))))
+
+(ert-deftest nucleo-completion-regexp-only-groups-skip-expanded-fuzzy-test ()
+  (let ((nucleo-completion-regexp-functions
+         (list (lambda (term)
+                 (when (string= term "nihon")
+                   "日本")))))
+    (should (equal (nucleo-completion--regexp-only-regexp-groups "nihon go")
+                   (list '("日本")
+                         (list (concat "\\`"
+                                       (nucleo-completion--subsequence-regexp
+                                        "go"))))))))
 
 (ert-deftest nucleo-completion-regexp-functions-cached-per-completion-test ()
   (let ((nucleo-completion-tests--regexp-calls 0)

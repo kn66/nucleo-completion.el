@@ -159,8 +159,16 @@ Regexp expanders configured with ~nucleo-completion-regexp-functions~ are cached
 for the duration of each completion pass.  This avoids repeatedly invoking slow
 expanders while deciding whether expansion is needed, filtering candidates, and
 highlighting matches.  When the Rust module is available, Nucleo fuzzy matching
-runs before the Elisp regexp filter, and regexp matching is only applied to
-candidates that were not already accepted by the module.
+runs before the Elisp regexp-only filter, and regexp matching is only applied to
+candidates that were not already accepted by the module.  In that regexp-only
+pass, terms with configured regexp expansions do not rerun the fuzzy matcher
+that the module already handled.
+
+Very short regexp expansions can be disproportionately expensive.  By default,
+~nucleo-completion-regexp-functions~ is only called for terms with at least two
+characters, which avoids broad one-character Migemo patterns during commands such
+as ~consult-line~.  Set ~nucleo-completion-regexp-minimum-term-length~ to 1 when
+you want regexp expanders to run for single-character terms too.
 
 Completion attempts such as ~TAB~ use the same expander-aware candidate set as
 candidate listing.  If multiple expander or space-separated matches exist but
@@ -256,6 +264,9 @@ Migemo. Each function receives one whitespace-separated search term and returns
 a regexp string, a list of regexp strings, or nil.
 Regexp expander results are cached for each completion pass, so user
 configuration normally does not need its own per-term cache.
+The default ~nucleo-completion-regexp-minimum-term-length~ is 2, so the examples
+below do not run Migemo/pyim expansion for one-character terms unless you lower
+that option.
 
 Migemo example:
 

@@ -64,6 +64,15 @@ ANDed together."
   :type '(repeat function)
   :group 'nucleo-completion)
 
+(defcustom nucleo-completion-regexp-minimum-term-length 2
+  "Minimum search term length for calling regexp expanders.
+Terms shorter than this value use only the built-in fuzzy matcher.
+The default avoids broad one-character regexp expansions from tools
+such as Migemo.  Set this to 1 to run regexp expanders for
+single-character terms too."
+  :type 'natnum
+  :group 'nucleo-completion)
+
 (defcustom nucleo-completion-scrub-non-unicode-candidates nil
   "Whether to strip non-Unicode codepoints before calling the Rust module.
 Some frontends append disambiguation characters above Unicode's
@@ -336,6 +345,12 @@ When CACHE is not a hash table, call PRODUCER without caching."
        nucleo-completion-max-highlighted-completions)
       0))
 
+(defun nucleo-completion--regexp-minimum-term-length ()
+  "Return a sanitized minimum term length for regexp expanders."
+  (or (nucleo-completion--nonnegative-integer-or-nil
+       nucleo-completion-regexp-minimum-term-length)
+      2))
+
 (defun nucleo-completion--load-module ()
   "Load the Rust dynamic module when it is available."
   (when (and (nucleo-completion--dynamic-modules-supported-p)
@@ -490,14 +505,16 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
 
 (defun nucleo-completion--regexp-function-regexps-uncached (term)
   "Return uncached extra regexps produced for TERM."
-  (cl-loop for function in nucleo-completion-regexp-functions
-           for value = (when (functionp function)
-                         (ignore-errors (funcall function term)))
-           append (cond
-                   ((nucleo-completion--valid-regexp-p value)
-                    (list value))
-                   ((listp value)
-                    (cl-remove-if-not #'nucleo-completion--valid-regexp-p value)))))
+  (when (>= (length term) (nucleo-completion--regexp-minimum-term-length))
+    (cl-loop for function in nucleo-completion-regexp-functions
+             for value = (when (functionp function)
+                           (ignore-errors (funcall function term)))
+             append (cond
+                     ((nucleo-completion--valid-regexp-p value)
+                      (list value))
+                     ((listp value)
+                      (cl-remove-if-not
+                       #'nucleo-completion--valid-regexp-p value))))))
 
 (defun nucleo-completion--term-regexps (term)
   "Return regexps that may match TERM."
@@ -517,13 +534,34 @@ least one regexp from every group."
   (cl-some #'nucleo-completion--regexp-function-regexps
            (nucleo-completion--terms needle)))
 
+(defun nucleo-completion--regexp-only-term-regexps (term)
+  "Return regexps for TERM in the module regexp-only pass.
+When TERM has configured regexp expansions, return only those
+regexps because the Rust module has already handled fuzzy matching.
+Terms without configured expansions still use the fuzzy matcher so
+they can combine with expanded terms."
+  (or (nucleo-completion--regexp-function-regexps term)
+      (list (concat "\\`" (nucleo-completion--subsequence-regexp term)))))
+
+(defun nucleo-completion--regexp-only-regexp-groups (needle)
+  "Return regexp groups for preserving regexp-only matches to NEEDLE."
+  (mapcar #'nucleo-completion--regexp-only-term-regexps
+          (nucleo-completion--terms needle)))
+
 (defun nucleo-completion--regexp-match-p (regexp-groups candidate)
   "Return non-nil if CANDIDATE matches REGEXP-GROUPS."
-  (cl-every (lambda (regexps)
-              (cl-some (lambda (regexp)
-                         (string-match-p regexp candidate))
-                       regexps))
-            regexp-groups))
+  (let ((groups regexp-groups)
+        (matched t))
+    (while (and matched groups)
+      (let ((regexps (car groups))
+            group-matched)
+        (while (and (not group-matched) regexps)
+          (when (string-match-p (car regexps) candidate)
+            (setq group-matched t))
+          (setq regexps (cdr regexps)))
+        (setq matched group-matched
+              groups (cdr groups))))
+    matched))
 
 (defun nucleo-completion--regexp-filter (needle candidates)
   "Filter CANDIDATES against NEEDLE with fuzzy and configured regexp matchers."
@@ -1008,7 +1046,7 @@ Walk SCORABLE once."
   (let ((seen (make-hash-table :test #'equal
                                :size (max 1 (length module-candidates))))
         (case-fold-search completion-ignore-case)
-        (regexp-groups (nucleo-completion--term-regexp-groups needle))
+        (regexp-groups (nucleo-completion--regexp-only-regexp-groups needle))
         result)
     (dolist (candidate module-candidates)
       (puthash candidate t seen))
