@@ -116,7 +116,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.11")
+  (setq nucleo-completion-module-release-tag "v0.1.12")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
