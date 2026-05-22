@@ -4,7 +4,7 @@
 
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
-;; Version: 0.1.13
+;; Version: 0.1.14
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
@@ -209,7 +209,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defconst nucleo-completion-required-module-version "0.1.13"
+(defconst nucleo-completion-required-module-version "0.1.14"
   "Version of the prebuilt Rust module expected by this package.")
 
 (defcustom nucleo-completion-module-release-tag nil

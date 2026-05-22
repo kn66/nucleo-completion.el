@@ -116,7 +116,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.13")
+  (setq nucleo-completion-module-release-tag "v0.1.14")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -171,7 +171,7 @@ release artifacts named
 - ~x86_64-pc-windows-msvc~
 
 Run the workflow manually with the release tag matching the package version,
-for example ~v0.1.13~, to upload assets to an existing GitHub Release.  The
+for example ~v0.1.14~, to upload assets to an existing GitHub Release.  The
 workflow checks that the tag matches both the Cargo package version and
 ~nucleo-completion-required-module-version~, then runs the same Rust and Elisp
 verification gates as CI before building release assets.  Linux binaries are
@@ -185,8 +185,9 @@ Behavior and verification details are maintained in
 
 * Performance
 
-The Rust module scores large candidate sets in worker threads using dynamic
-batches.  Emacs Lisp filtering is wrapped in ~while-no-input~ so newer
+The Rust module scores candidates in one module call with a reused matcher, and
+keeps only matched candidates plus the sort keys required by enabled tie
+breakers.  Emacs Lisp filtering is wrapped in ~while-no-input~ so newer
 keystrokes can interrupt stale completion passes while control is in Lisp; the
 module call itself is synchronous.
 
