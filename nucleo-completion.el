@@ -5,7 +5,7 @@
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
 ;; Version: 0.1.16
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
 ;; SPDX-License-Identifier: GPL-3.0-or-later

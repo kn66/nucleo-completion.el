@@ -1,7 +1,7 @@
 #+title: nucleo-completion
 
 ~nucleo-completion~ is an Emacs completion style backed by a Rust dynamic
-module using the ~nucleo-matcher~ crate.
+module using the ~nucleo-matcher~ crate.  Emacs 29.1 or newer is required.
 
 It also works without the Rust module by falling back to a simple Emacs Lisp
 subsequence matcher.
@@ -159,7 +159,7 @@ The loader also checks ~target/release~ and ~target/debug~, so no extra
 Emacs must be built with dynamic module support. You can check this with
 ~(functionp 'module-load)~.
 
-CI installs Emacs 27.1 explicitly and also tests a newer distribution version.
+CI installs the minimum supported Emacs 29.1 explicitly and also tests a newer distribution version.
 Both jobs verify the selected Emacs version and dynamic module support before
 running the checks.
 
