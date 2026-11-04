@@ -134,27 +134,7 @@ jobs:
             -L . \
             -L "target/${{ matrix.target }}/release" \
             -l nucleo-completion.el \
-            --eval '(progn
-                      (unless (featurep (quote nucleo-completion-module))
-                        (error "nucleo-completion module did not load"))
-                      (unless (string= (nucleo-completion-module-version)
-                                       nucleo-completion-required-module-version)
-                        (error "loaded module version mismatch"))
-                      (unless (equal (car (nucleo-completion-candidates
-                                           "fb" (list "fb" "foo-baz" "bar")
-                                           nil nil nil 0 nil))
-                                     (list "fb" "foo-baz"))
-                        (error "loaded module did not score candidates"))
-                      (dolist (case (quote ((nucleo-completion-migemo-regexp "kensaku" "検索")
-                                            (nucleo-completion-pinyin-regexp "zhongguo" "中国")
-                                            (nucleo-completion-hangul-regexp "ㄱㅅ" "감사"))))
-                        (unless (string-match-p (funcall (car case) (cadr case)) (caddr case))
-                          (error "loaded module language search failed: %S" case)))
-                      (unless (equal (nth 3 (nucleo-completion-candidates-with-regexp-groups
-                                             "nihon" (list "日本") nil nil nil nil 0 nil
-                                             (list (list "日本"))))
-                                     (list "日本"))
-                        (error "loaded module combined language scan failed")))'
+            -l test/module-smoke-test.el
 
       - name: Verify module loads (Windows)
         if: runner.os == 'Windows'
@@ -173,34 +153,12 @@ jobs:
           if (-not $emacs) {
             throw "emacs.exe not found"
           }
-          $eval = @'
-          (progn
-            (unless (featurep (quote nucleo-completion-module))
-              (error "nucleo-completion module did not load"))
-            (unless (string= (nucleo-completion-module-version)
-                             nucleo-completion-required-module-version)
-              (error "loaded module version mismatch"))
-            (unless (equal (car (nucleo-completion-candidates
-                                 "fb" (list "fb" "foo-baz" "bar")
-                                 nil nil nil 0 nil))
-                           (list "fb" "foo-baz"))
-              (error "loaded module did not score candidates"))
-            (dolist (case (quote ((nucleo-completion-migemo-regexp "kensaku" "検索")
-                                  (nucleo-completion-pinyin-regexp "zhongguo" "中国")
-                                  (nucleo-completion-hangul-regexp "ㄱㅅ" "감사"))))
-              (unless (string-match-p (funcall (car case) (cadr case)) (caddr case))
-                (error "loaded module language search failed: %S" case)))
-            (unless (equal (nth 3 (nucleo-completion-candidates-with-regexp-groups
-                                   "nihon" (list "日本") nil nil nil nil 0 nil
-                                   (list (list "日本"))))
-                           (list "日本"))
-              (error "loaded module combined language scan failed")))
-          '@
           & $emacs -Q --batch `
             -L . `
             -L "target/${{ matrix.target }}/release" `
             -l nucleo-completion.el `
-            --eval $eval
+            -l test/module-smoke-test.el
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage module
         shell: bash
