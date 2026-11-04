@@ -2,3 +2,4 @@
 /bin/
 *.elc
 .codex
+__pycache__/
