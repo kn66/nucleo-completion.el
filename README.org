@@ -165,8 +165,8 @@ running the checks.
 
 * Prebuilt Release Assets
 
-The GitHub Actions workflow in ~.github/workflows/prebuilt-modules.yml~ builds
-release artifacts named
+The GitHub Actions workflow in ~.github/workflows/prebuilt-modules.yml~ runs
+automatically after every push to ~main~.  It builds modules named
 ~nucleo-completion-module-<target-triple>.<extension>~ plus matching
 ~.sha256~ and ~.licenses.txt~ files for:
 
@@ -175,15 +175,24 @@ release artifacts named
 - ~aarch64-apple-darwin~
 - ~x86_64-pc-windows-msvc~
 
-Run the workflow manually with the release tag matching the package version,
-for example ~v0.1.16~, to upload assets to an existing GitHub Release.  The
-workflow checks that the tag matches both the Cargo package version and
-~nucleo-completion-required-module-version~, then runs the same Rust and Elisp
-verification gates as CI before building release assets.  Each platform build
-also loads its produced module in Emacs and checks scoring and bundled language
-search before
-uploading the artifact.  Linux binaries are sensitive to libc compatibility;
-for broad Linux distribution, consider adding a musl release asset.
+After validation and the platform-specific load checks succeed, each build
+stores an Actions artifact named ~nucleo-completion-<target-triple>~.  Open the
+~prebuilt-modules~ run under the repository's Actions tab and download the
+matching item from its Artifacts section.  Push builds do not publish or
+replace GitHub Releases.
+
+To publish a release, run the same workflow manually with a tag matching the
+package version, for example ~v0.1.16~.  The workflow verifies that the tag
+matches the Cargo package version and ~nucleo-completion-required-module-version~
+before uploading the modules, checksums and license notices to GitHub Releases.
+The module installer continues to download published Release assets.
+
+Both automatic and manual runs check package/module version consistency and run
+the same Rust and Elisp verification gates as CI before building the modules.
+Each platform build loads its produced module in Emacs and checks scoring,
+bundled language search and the combined candidate scan before uploading its
+artifact.  Linux binaries are sensitive to libc compatibility; for broad Linux
+distribution, consider adding a musl release asset.
 
 * Performance
 
