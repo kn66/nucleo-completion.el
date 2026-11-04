@@ -1,0 +1,51 @@
+Bundled language search components
+==================================
+
+nucleo-completion is distributed under GPL-3.0-or-later (see LICENSE).
+The following additional components and data are used for language search.
+Original notices and license texts are preserved under LICENSES/.
+
+Japanese expansion engine:
+  rustmigemo 0.1.7-dev.0
+  https://github.com/oguna/rustmigemo
+  Revision: 121101dfcfd9465c998ba53fabe43773b14bf868
+  Copyright (c) 2025 oguna
+  MIT: LICENSES/rustmigemo-MIT
+
+Japanese dictionary:
+  yet-another-migemo-dict v0.6 (Mozc and UniDic derived)
+  https://github.com/oguna/yet-another-migemo-dict/releases/tag/v0.6
+  BSD-3-Clause:
+    LICENSES/migemo-dict-LICENSE
+    LICENSES/migemo-dict-LICENSE_Mozc
+    LICENSES/migemo-dict-LICENSE_UniDic
+  See data/README.org for the source archive and SHA256 checksums.
+
+Chinese character readings:
+  pinyin 0.11.0
+  https://github.com/mozillazg/rust-pinyin
+  Character data: https://github.com/mozillazg/pinyin-data
+  Copyright (c) 2016 mozillazg
+  MIT: LICENSES/pinyin-MIT (also covers the upstream pinyin-data notice)
+
+Dictionary byte decoding (rustmigemo dependency):
+  byteorder 1.5.0
+  https://github.com/BurntSushi/byteorder
+  MIT: LICENSES/byteorder-MIT
+
+Korean initial-consonant expansion uses the Unicode modern Hangul syllable
+layout directly and has no additional bundled dictionary or dependency.
+
+Binary releases include a companion .licenses.txt file containing this
+notice, the package license, and the above verbatim license texts.
+
+Native language regexp matching:
+  regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11
+  https://github.com/rust-lang/regex
+  aho-corasick 1.1.5
+  https://github.com/BurntSushi/aho-corasick
+  Used under the MIT terms; original notices are in:
+    LICENSES/regex-1.13.1-MIT
+    LICENSES/regex-automata-0.4.18-MIT
+    LICENSES/regex-syntax-0.8.11-MIT
+    LICENSES/aho-corasick-1.1.5-MIT

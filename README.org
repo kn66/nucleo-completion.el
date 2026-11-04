@@ -115,7 +115,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.15")
+  (setq nucleo-completion-module-release-tag "v0.1.16")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -147,6 +147,8 @@ To ask once at interactive startup when no module is available, set:
 
 * Local Build
 
+Rust 1.85 or newer is required by the pinned Migemo dependency.
+
 #+begin_src sh
   cargo build --release
 #+end_src
@@ -157,12 +159,16 @@ The loader also checks ~target/release~ and ~target/debug~, so no extra
 Emacs must be built with dynamic module support. You can check this with
 ~(functionp 'module-load)~.
 
+CI installs Emacs 27.1 explicitly and also tests a newer distribution version.
+Both jobs verify the selected Emacs version and dynamic module support before
+running the checks.
+
 * Prebuilt Release Assets
 
 The GitHub Actions workflow in ~.github/workflows/prebuilt-modules.yml~ builds
 release artifacts named
 ~nucleo-completion-module-<target-triple>.<extension>~ plus matching
-~.sha256~ files for:
+~.sha256~ and ~.licenses.txt~ files for:
 
 - ~x86_64-unknown-linux-gnu~
 - ~x86_64-apple-darwin~
@@ -170,11 +176,12 @@ release artifacts named
 - ~x86_64-pc-windows-msvc~
 
 Run the workflow manually with the release tag matching the package version,
-for example ~v0.1.15~, to upload assets to an existing GitHub Release.  The
+for example ~v0.1.16~, to upload assets to an existing GitHub Release.  The
 workflow checks that the tag matches both the Cargo package version and
 ~nucleo-completion-required-module-version~, then runs the same Rust and Elisp
 verification gates as CI before building release assets.  Each platform build
-also loads its produced module in Emacs and runs a small scoring check before
+also loads its produced module in Emacs and checks scoring and bundled language
+search before
 uploading the artifact.  Linux binaries are sensitive to libc compatibility;
 for broad Linux distribution, consider adding a musl release asset.
 
@@ -188,9 +195,34 @@ module call itself is synchronous.
 
 The module returns scores and match indices together, so highlighted characters
 track the same match that produced the score without one module call per
-candidate.  Regexp expander results are cached for each completion pass, and the
+candidate.
+
+For case-sensitive built-in language search over at least 4,096 candidates,
+the module also tests language regexps during that same candidate scan.  Only
+fuzzy misses need the extra regexp tests.  Lisp retains the existing merging,
+priority and highlighting rules, without another full candidate scan.
+
+Smaller lists, custom regexp functions, case-insensitive searches, unsupported
+regexp syntax, and candidates that need non-Unicode scrubbing use the existing
+Emacs regexp path.  The cutoff avoids compiling native regexps for small lists
+where setup costs can exceed the savings.  Translation accepts only the shared
+regexp subset emitted by the language backends and fuzzy fallback; unsupported
+patterns and compilation limits trigger fallback before scanning candidates.
+
+Regexp expander results are cached for each completion pass, and the
 default minimum expander term length is two characters to avoid broad
 one-character patterns.
+
+Compare the existing scan and automatic native selection locally with:
+
+#+begin_src sh
+  cargo build --release
+  emacs -Q --batch -L . -l bench/language-search.el
+#+end_src
+
+The benchmark uses mixed ASCII/Japanese/Chinese synthetic candidates and warms
+the language dictionaries before timing.  Timings depend on candidate content,
+query and hardware; ~bench/README.org~ records the local comparison.
 
 For an external benchmark comparison, see
 [[https://github.com/kn66/emacs-completion-bench][emacs-completion-bench]].
@@ -286,6 +318,64 @@ change the visual style.  The default faces avoid background colors so they do
 not conflict with completion UI selection highlights or color themes.  Score
 band highlighting requires the Rust module.
 
+** Bundled Language Search
+
+With the Rust module, Japanese Migemo search is enabled by default.  For
+example, ~kensaku~ also finds ~検索~, and ~nihon~ finds ~日本~.  The module embeds
+its dictionary; no external ~cmigemo~ program, ~migemo.el~, dictionary download,
+or dictionary path is needed at runtime.
+
+Select additional languages, or disable language expansion entirely:
+
+#+begin_src emacs-lisp
+  ;; Japanese Migemo, Chinese pinyin, and Korean initial consonants.
+  (setq nucleo-completion-languages '(japanese chinese korean))
+
+  ;; Only Japanese (the default).
+  (setq nucleo-completion-languages '(japanese))
+
+  ;; Fuzzy matching and user-provided regexp expanders only.
+  (setq nucleo-completion-languages nil)
+#+end_src
+
+Chinese search accepts joined, toneless pinyin, such as ~zhongguo~ for ~中国~.
+It considers alternative syllable divisions and character readings, and allows
+the final syllable to be incomplete.  Spellings using ~ü~, ~v~, or ~u:~ are
+equivalent: ~lü~, ~lv~, and ~lu:~ can all find ~绿~.  An apostrophe explicitly
+separates syllables: ~xi'an~ finds ~西安~ without also matching ~先~, while
+~xian~ considers both divisions.  It is character-based rather than a phrase
+pronunciation model; tone numbers and pinyin initials are not supported.
+Korean search accepts initial consonants, such as ~ㄱㅅ~ for ~감사~, including
+modern conjoining initials.  Complete Hangul syllables and ASCII letters or
+digits can be mixed with initials.  At least one initial is required.
+
+Language matches use the same regexp-only ordering and highlighting described
+below.  Terms still combine with AND, so ~nihon txt~ can find ~日本.txt~.
+The existing two-character minimum also applies to language search.  Long or
+unsupported terms fall back to ordinary fuzzy matching.  Japanese expansion
+accepts at most 32 ASCII letters.  Chinese input accepts at most 32 characters,
+including syllable separators and the colon in ~u:~.  Korean terms accept at
+most 32 characters.  Large Chinese expansions are bounded to keep ambiguous
+inputs from producing unbounded regexps.
+
+Language data is initialized lazily on first use.  Without the Rust module,
+language expansion is unavailable, while fuzzy matching and user-configured
+Lisp expanders continue to work.  Native language availability is checked
+separately, so older modules that lack the functions are also safe to load.
+Rebuild the module and restart Emacs when upgrading an already loaded module.
+
+The bundled Japanese dictionary is ~yet-another-migemo-dict~ v0.6 (about
+1.4 MB uncompressed), derived from Mozc and UniDic.  Its source, checksum, and
+license texts are recorded in ~data/README.org~, ~THIRD-PARTY-NOTICES~, and
+~LICENSES/~.  Dictionary bytes are checked into the repository, so building
+never fetches a dictionary.  The module uses a pinned revision of ~rustmigemo~
+and the ~pinyin~ crate; Korean initial ranges need no external dictionary.
+
+Japanese lookup accepts uppercase and mixed-case romaji.  ASCII alternatives
+preserve the original input spelling; the normal fuzzy matcher and
+~completion-ignore-case~ control ASCII case matching.  The bundled Japanese
+backend does not add unrelated ASCII-only dictionary alternatives.
+
 ** Regexp Expanders
 
 ~nucleo-completion-regexp-functions~ can add language-specific matchers.
@@ -293,14 +383,17 @@ Each function receives one whitespace-separated search term and returns a
 non-empty regexp string, a list of non-empty regexp strings, or nil.  Empty or
 invalid regexps are ignored.
 Regexp expander results are cached for each completion pass, so user
-configuration normally does not need its own per-term cache.
+configuration normally does not need its own per-term cache.  Lazy highlighting
+retains the result's expansion cache and relevant settings for its callback
+lifetime, so drawing additional rows does not regenerate the same regexps.
 The default ~nucleo-completion-regexp-minimum-term-length~ is 2, so expanders do
 not run for one-character terms unless you lower that option.
 If an expander signals an error, it is ignored.  To diagnose expander failures,
 set ~nucleo-completion-report-regexp-function-errors~ to non-nil; each failing
 function is then reported once with ~display-warning~.
 
-Japanese Migemo example:
+For an externally configured Migemo installation instead of the bundled
+backend, set ~nucleo-completion-languages~ to nil and use this adapter:
 
 #+begin_src emacs-lisp
   (with-eval-after-load 'migemo
@@ -317,7 +410,7 @@ Japanese Migemo example:
                  #'my-nucleo-completion-migemo-regexp))
 #+end_src
 
-Chinese pyim example:
+For an existing pyim configuration instead of the bundled Chinese backend:
 
 #+begin_src emacs-lisp
   (with-eval-after-load 'pyim
@@ -382,12 +475,13 @@ When score-band highlighting is enabled, regexp-only matches use the high-score
 face instead of being dimmed as low-score fuzzy matches.
 
 To keep ~nucleo~ scoring in Corfu while disabling Migemo/pyim expansion there,
-make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
+make both language selection and custom expanders buffer-local in Corfu buffers:
 
 #+begin_src emacs-lisp
   (add-hook 'corfu-mode-hook
             (lambda ()
-              (setq-local nucleo-completion-regexp-functions nil)))
+              (setq-local nucleo-completion-languages nil
+                          nucleo-completion-regexp-functions nil)))
 #+end_src
 
 * Acknowledgements
@@ -395,3 +489,28 @@ make ~nucleo-completion-regexp-functions~ buffer-local in Corfu buffers:
 This package was inspired in part by ~hotfuzz~, ~fussy~, and ~fzf-native~.
 Their native scoring, threading, and interactive completion strategies informed
 the performance work here.
+
+* Graphical Smoke Tests
+
+After rebuilding the module, restart graphical Emacs and check:
+
+- In Vertico and Corfu, enter ~kensaku~ against candidates containing ~検索~,
+  ~kensaku~ and unrelated text.  Check that the Japanese result is visible and
+  the matching characters are highlighted, including lazy highlighting.
+- Enable all three languages and check ~zhongguo~ against ~中国~ and ~ㄱㅅ~
+  against ~감사~.  Check mixed terms such as ~nihon txt~ against ~日本.txt~.
+- With ~completion-ignore-case~ nil, check that ~FOO~ does not find ~foo~;
+  ~NIHON~ should still find ~日本~.  Repeat with case-insensitive completion.
+- With Chinese enabled, check ~lü~, ~lv~, and ~lu:~ against ~绿~, and
+  ~xi'an~ against ~西安~ and ~先~.  Only ~西安~ should match the separated input.
+- With lazy highlighting, scroll through language results and check consistent
+  highlighting after changing buffers; a new completion must use its own
+  language and case settings.
+- Repeat built-in language searches with at least 4,096 candidates.  Check
+  candidate ordering, selection, and lazy highlighting while scrolling.
+- Toggle ~nucleo-completion-languages~ between enabled and nil in the same
+  completion session.  Check that previously filtered results are not reused.
+- With score bands enabled, check that language-only matches use the high-score
+  face and respect ~nucleo-completion-regexp-only-match-priority~.
+- Disable both languages and custom expanders buffer-locally in a Corfu buffer;
+  verify that minibuffer language search continues to work.

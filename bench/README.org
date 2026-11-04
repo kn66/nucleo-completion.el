@@ -1,0 +1,48 @@
+#+title: Language search benchmark
+
+Run from the repository root after building the release module:
+
+#+begin_src sh
+  cargo build --release
+  emacs -Q --batch -L . -l bench/language-search.el
+#+end_src
+
+The script compares the legacy Lisp regexp scan with automatic native selection
+in the same Emacs process.  It disables only the combined entry point for the
+legacy measurement.  Both modes use the same candidate list and release binary.
+The default is five iterations; change ~nucleo-benchmark-iterations~ before
+loading the script to choose a different count.
+
+The synthetic list has 80% ASCII file names, 10% ASCII ~kensaku~ names, 5%
+Japanese ~検索結果~ names, and 5% Chinese ~中国文件~ names.  Each measurement
+warms the query, collects garbage, then times complete filtering and eager
+highlighting.  Dictionary initialization is excluded.  The GC threshold is
+128 MiB, case-sensitive matching is used, and score bands are disabled.
+
+* Local comparison, 2026-11-04
+
+GNU Emacs 30.2, Linux x86_64, release profile, 10 timed iterations, milliseconds
+per completion.  No GC occurred inside these measurements.
+
+| Candidates | Query   | Language | Legacy | Automatic |
+|------------+---------+----------+--------+-----------|
+|      10000 | kensaku | Japanese |   6.68 |      4.22 |
+|      10000 | kensaku | Chinese  |   8.20 |      5.01 |
+|      10000 | beijing | Japanese |   5.77 |      4.76 |
+|      10000 | beijing | Chinese  |  14.38 |     10.34 |
+|     100000 | kensaku | Japanese |  69.72 |     39.56 |
+|     100000 | kensaku | Chinese  |  77.61 |     39.04 |
+|     100000 | beijing | Japanese |  53.26 |     36.32 |
+|     100000 | beijing | Chinese  |  97.94 |     38.94 |
+
+With languages disabled, the 100,000-candidate ~kensaku~ control was 31.59 ms
+and 31.66 ms; both modes use the same fuzzy-only path.
+
+Smaller lists can cost more to compile natively than to scan in Lisp.  Automatic
+selection therefore retains the legacy path below 4,096 candidates.  It also
+retains that path for custom expanders, case-insensitive searches, unsupported
+regexp syntax, and candidates requiring Unicode scrubbing.  The cutoff is a
+conservative heuristic, not a guarantee about the crossover on every machine.
+
+These figures describe this synthetic workload, not GUI latency or all real
+completion tables.  Re-run locally when changing the matcher or candidate data.

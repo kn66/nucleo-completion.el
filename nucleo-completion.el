@@ -4,7 +4,7 @@
 
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
-;; Version: 0.1.15
+;; Version: 0.1.16
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
@@ -37,8 +37,19 @@
                   (pattern candidates ignore-case sort-ties-by-length
                            sort-ties-alphabetically history-ranks
                            highlight-limit return-all-scores))
+(declare-function nucleo-completion-candidates-with-regexp-groups
+                  "ext:nucleo-completion-module"
+                  (pattern candidates ignore-case sort-ties-by-length
+                           sort-ties-alphabetically history-ranks
+                           highlight-limit return-all-scores regexp-groups))
 (declare-function nucleo-completion-module-version
                   "ext:nucleo-completion-module")
+(declare-function nucleo-completion-migemo-regexp
+                  "ext:nucleo-completion-module" (term))
+(declare-function nucleo-completion-pinyin-regexp
+                  "ext:nucleo-completion-module" (term))
+(declare-function nucleo-completion-hangul-regexp
+                  "ext:nucleo-completion-module" (term))
 (declare-function mm-destroy-parts "mm-decode")
 (declare-function mm-dissect-buffer "mm-decode")
 (declare-function mm-save-part-to-file "mm-decode")
@@ -64,6 +75,18 @@
   "Number of top-ranking completions to highlight eagerly.
 Large values can decrease performance."
   :type 'natnum
+  :group 'nucleo-completion)
+
+(defcustom nucleo-completion-languages '(japanese)
+  "Languages to expand into additional completion regexps.
+Japanese uses the bundled Migemo dictionary; Chinese uses pinyin,
+and Korean uses Hangul initial consonants.  Expansions are available
+when the loaded module provides the corresponding functions.  They
+are combined with `nucleo-completion-regexp-functions' and respect
+`nucleo-completion-regexp-minimum-term-length'."
+  :type '(set (const :tag "Japanese (Migemo)" japanese)
+              (const :tag "Chinese (pinyin)" chinese)
+              (const :tag "Korean (initial consonants)" korean))
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-regexp-functions nil
@@ -210,7 +233,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defconst nucleo-completion-required-module-version "0.1.15"
+(defconst nucleo-completion-required-module-version "0.1.16"
   "Version of the prebuilt Rust module expected by this package.")
 
 (defcustom nucleo-completion-module-release-tag nil
@@ -300,6 +323,10 @@ Each entry has the form (FILE . MESSAGE).")
 (defvar nucleo-completion--exact-word-regexp-cache nil
   "Cache for exact word regexps during one completion pass.")
 
+(defconst nucleo-completion--native-regexp-minimum-candidates 4096
+  "Minimum candidate count for the native regexp scan.
+Compiling the regexps costs more than the Lisp scan for small lists.")
+
 (defconst nucleo-completion--score-property 'nucleo-completion-score
   "Text property used to carry Rust scores on returned candidates.")
 
@@ -332,6 +359,19 @@ When CACHE is not a hash table, call PRODUCER without caching."
             value)))
     (funcall producer)))
 
+(defun nucleo-completion--regexp-expanders ()
+  "Return configured and available language regexp expanders.
+Older modules may not provide the language functions; do not load a
+module here because the normal completion path handles module loading."
+  (append nucleo-completion-regexp-functions
+          (cl-loop for (language . function) in
+                   '((japanese . nucleo-completion-migemo-regexp)
+                     (chinese . nucleo-completion-pinyin-regexp)
+                     (korean . nucleo-completion-hangul-regexp))
+                   when (and (memq language nucleo-completion-languages)
+                             (fboundp function))
+                   collect function)))
+
 (defmacro nucleo-completion--with-completion-pass-caches (&rest body)
   "Run BODY with caches shared by one completion filtering pass.
 These caches are dynamically scoped so regexp expansion, term
@@ -343,7 +383,7 @@ setup, filtering, and highlighting work for the same user input."
           (nucleo-completion--subsequence-regexp-cache
            (make-hash-table :test #'equal))
           (nucleo-completion--regexp-cache
-           (and nucleo-completion-regexp-functions
+           (and (nucleo-completion--regexp-expanders)
                 (make-hash-table :test #'equal))))
      ,@body))
 
@@ -772,15 +812,19 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
 
 (defun nucleo-completion--regexp-function-regexps (term)
   "Return extra regexps produced for TERM."
-  (nucleo-completion--cached
-   nucleo-completion--regexp-cache
-   term
-   (lambda () (nucleo-completion--regexp-function-regexps-uncached term))))
+  (let ((case-fold-search completion-ignore-case))
+    (nucleo-completion--cached
+     nucleo-completion--regexp-cache
+     (list term (copy-sequence nucleo-completion-languages)
+           (nucleo-completion--regexp-expanders)
+           (nucleo-completion--regexp-minimum-term-length)
+           completion-ignore-case)
+     (lambda () (nucleo-completion--regexp-function-regexps-uncached term)))))
 
 (defun nucleo-completion--regexp-function-regexps-uncached (term)
   "Return uncached extra regexps produced for TERM."
   (when (>= (length term) (nucleo-completion--regexp-minimum-term-length))
-    (cl-loop for function in nucleo-completion-regexp-functions
+    (cl-loop for function in (nucleo-completion--regexp-expanders)
              for value = (nucleo-completion--regexp-function-value
                           function term)
              append (cond
@@ -797,7 +841,7 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
 (defun nucleo-completion--term-regexps (term)
   "Return regexps that may match TERM."
   (let ((fuzzy (nucleo-completion--term-fuzzy-regexp term)))
-    (if nucleo-completion-regexp-functions
+    (if (nucleo-completion--regexp-expanders)
         (cons fuzzy (nucleo-completion--regexp-function-regexps term))
       (list fuzzy))))
 
@@ -811,7 +855,7 @@ least one regexp from every group."
 
 (defun nucleo-completion--expanded-regexp-p (needle)
   "Return non-nil if NEEDLE has extra regexps from configured functions."
-  (and nucleo-completion-regexp-functions
+  (and (nucleo-completion--regexp-expanders)
        (cl-some #'nucleo-completion--regexp-function-regexps
                 (nucleo-completion--terms needle))))
 
@@ -1194,7 +1238,8 @@ the Rust module.  Mutates BUNDLE in place because the lists were
 freshly returned by the Rust module and are not shared with any
 other caller."
   (let ((candidate-queues (nucleo-completion--scrub-map-queues map))
-        (top-info-queues (nucleo-completion--scrub-map-queues map)))
+        (top-info-queues (nucleo-completion--scrub-map-queues map))
+        (extra-queues (nucleo-completion--scrub-map-queues map)))
     (cl-loop for cell on (nucleo-completion--bundle-candidates bundle)
              do (setcar cell
                         (nucleo-completion--restore-scored-scrubbed-candidate
@@ -1202,31 +1247,41 @@ other caller."
     (dolist (entry (nucleo-completion--bundle-top-info bundle))
       (setcar entry
               (nucleo-completion--restore-scrubbed-candidate
-               (car entry) map top-info-queues))))
+               (car entry) map top-info-queues)))
+    (cl-loop for cell on (nth 3 bundle)
+             do (setcar cell
+                        (nucleo-completion--restore-scrubbed-candidate
+                         (car cell) map extra-queues))))
   bundle)
 
 (defun nucleo-completion--call-module
     (needle candidates ignore-case highlight-limit return-all-scores
-            &optional history-ranks)
+            &optional history-ranks regexp-groups)
   "Call the Rust module for NEEDLE and CANDIDATES.
-IGNORE-CASE, HIGHLIGHT-LIMIT, RETURN-ALL-SCORES, and optional
-HISTORY-RANKS are passed through to the module.  Return a result
-bundle."
-  (if (and history-ranks
-           (nucleo-completion--module-supports-history-p))
-      (nucleo-completion-candidates-with-history
-       needle candidates ignore-case
-       nucleo-completion-sort-ties-by-length
-       nucleo-completion-sort-ties-alphabetically
-       history-ranks
-       highlight-limit
-       return-all-scores)
+IGNORE-CASE, HIGHLIGHT-LIMIT, RETURN-ALL-SCORES, HISTORY-RANKS,
+and REGEXP-GROUPS are passed through to the module.  REGEXP-GROUPS
+selects the combined fuzzy and regexp scan.  Return a result bundle
+or `nucleo-completion-unsupported-regexp' if the groups cannot be
+translated."
+  (cond
+   (regexp-groups
+    (nucleo-completion-candidates-with-regexp-groups
+     needle candidates ignore-case nucleo-completion-sort-ties-by-length
+     nucleo-completion-sort-ties-alphabetically history-ranks highlight-limit
+     return-all-scores regexp-groups))
+   ((and history-ranks
+         (nucleo-completion--module-supports-history-p))
+    (nucleo-completion-candidates-with-history
+     needle candidates ignore-case
+     nucleo-completion-sort-ties-by-length
+     nucleo-completion-sort-ties-alphabetically
+     history-ranks highlight-limit return-all-scores))
+   (t
     (nucleo-completion-candidates
      needle candidates ignore-case
      nucleo-completion-sort-ties-by-length
      nucleo-completion-sort-ties-alphabetically
-     highlight-limit
-     return-all-scores)))
+     highlight-limit return-all-scores))))
 
 (defun nucleo-completion--module-unicode-error-p (err)
   "Return non-nil when ERR is the module string encoder rejecting input."
@@ -1235,25 +1290,31 @@ bundle."
 
 (defun nucleo-completion--module-results-with-scrub
     (needle candidates ignore-case highlight-limit return-all-scores
-            scrub-non-unicode &optional history-ranks)
+            scrub-non-unicode &optional history-ranks regexp-groups)
   "Return module result bundle for NEEDLE, scrubbing CANDIDATES.
 IGNORE-CASE, HIGHLIGHT-LIMIT, and RETURN-ALL-SCORES are passed to
 the module.  SCRUB-NON-UNICODE selects the candidate scrub path.
-HISTORY-RANKS, when non-nil, is parallel to CANDIDATES."
+HISTORY-RANKS, when non-nil, is parallel to CANDIDATES.
+REGEXP-GROUPS selects the combined scan; candidates requiring
+scrubbing return the unsupported-regexp marker for safe fallback."
   (pcase-let* ((`(,cleaned . ,map)
                 (nucleo-completion--scrub-candidates
                  candidates scrub-non-unicode))
                (bundle
-                (nucleo-completion--call-module
-                 needle cleaned ignore-case highlight-limit
-                 return-all-scores history-ranks)))
-    (if (and map (not (nucleo-completion--bundle-interrupted-p bundle)))
+                ;; Removing a non-Unicode character can create a regexp match
+                ;; that does not exist in the original candidate.
+                (if (and regexp-groups map)
+                    'nucleo-completion-unsupported-regexp
+                  (nucleo-completion--call-module
+                   needle cleaned ignore-case highlight-limit
+                   return-all-scores history-ranks regexp-groups))))
+    (if (and map (listp bundle) (not (nucleo-completion--bundle-interrupted-p bundle)))
         (nucleo-completion--restore-bundle-candidates bundle map)
       bundle)))
 
 (defun nucleo-completion--module-results
     (needle candidates ignore-case highlight-limit
-            &optional return-all-scores history-ranks)
+            &optional return-all-scores history-ranks regexp-groups)
   "Return module result bundle for NEEDLE and CANDIDATES.
 The bundle is the list (CANDIDATES TOP-INFO FULL-SCORES) returned
 by the Rust module:
@@ -1265,6 +1326,10 @@ by the Rust module:
                  otherwise nil.
   FULL-SCORES  - parallel-to-CANDIDATES list of integer scores when
                  RETURN-ALL-SCORES is non-nil; otherwise nil.
+
+When REGEXP-GROUPS is non-nil, a fourth element contains regexp-only
+candidates.  Return `nucleo-completion-unsupported-regexp' when the
+groups cannot be translated or scrubbing makes the scan unsafe.
 
 Honor IGNORE-CASE.  HISTORY-RANKS, when non-nil, is a list
 parallel to CANDIDATES whose integer entries rank candidates by
@@ -1291,15 +1356,15 @@ copied strings."
            (condition-case err
                (nucleo-completion--module-results-with-scrub
                 needle candidates ignore-case highlight-limit return-all-scores
-                scrub-non-unicode history-ranks)
+                scrub-non-unicode history-ranks regexp-groups)
              (wrong-type-argument
               (if (and (not scrub-non-unicode)
                        (nucleo-completion--module-unicode-error-p err))
                   (nucleo-completion--module-results-with-scrub
                    needle candidates ignore-case highlight-limit
-                   return-all-scores t history-ranks)
+                   return-all-scores t history-ranks regexp-groups)
                 (signal (car err) (cdr err)))))))
-      (if return-all-scores
+      (if (and return-all-scores (listp bundle))
           (nucleo-completion--ensure-score-properties bundle)
         bundle))))
 
@@ -1638,7 +1703,8 @@ otherwise preserve the original CANDIDATES list."
       (cons candidates (nreverse scores)))))
 
 (defun nucleo-completion--merge-regexp-only-matches
-    (needle scorable bundle include-top-info-p)
+    (needle scorable bundle include-top-info-p
+            &optional precomputed-extra-p precomputed-extra)
   "Return BUNDLE merged with regexp-only matches from SCORABLE.
 NEEDLE is the current completion pattern.
 BUNDLE is (CANDIDATES TOP-INFO FULL-SCORES).  Return a new
@@ -1650,11 +1716,13 @@ extended with MAX-SCORE entries to keep the parallel-array
 invariant.  MAX-SCORE is only computed when either extension is
 needed.
 
-Candidates are partitioned according to
-`nucleo-completion-regexp-only-match-priority'."
+When PRECOMPUTED-EXTRA-P is non-nil, use PRECOMPUTED-EXTRA even if
+it is nil, instead of scanning SCORABLE.  Candidates are partitioned
+according to `nucleo-completion-regexp-only-match-priority'."
   (pcase-let* ((`(,module-candidates ,top-info ,full-scores) bundle)
-               (extra (nucleo-completion--regexp-only-candidates
-                       needle scorable module-candidates)))
+               (extra (if precomputed-extra-p precomputed-extra
+                        (nucleo-completion--regexp-only-candidates
+                         needle scorable module-candidates))))
     (if (null extra)
         bundle
       (let* ((max-score (when (or full-scores include-top-info-p)
@@ -1778,7 +1846,7 @@ SCORE is compared to MAX-SCORE."
 When INDICES is non-nil, highlight those precomputed match
 positions instead of recomputing a subsequence match."
   (let* ((case-fold-search completion-ignore-case)
-         (terms (and (or (not indices) nucleo-completion-regexp-functions)
+         (terms (and (or (not indices) (nucleo-completion--regexp-expanders))
                      (nucleo-completion--terms needle))))
     (if indices
         (dolist (index indices)
@@ -1796,7 +1864,7 @@ positions instead of recomputing a subsequence match."
                    do (add-face-text-property match (1+ match)
                                               'completions-common-part nil haystack)
                    (setq start (1+ match))))))
-    (when nucleo-completion-regexp-functions
+    (when (nucleo-completion--regexp-expanders)
       (dolist (term terms)
         (dolist (regexp (nucleo-completion--regexp-function-regexps term))
           (nucleo-completion--highlight-regexp regexp haystack)))))
@@ -1818,7 +1886,7 @@ another filtering path already handles regexp expansion."
   (if (or expanded-regexp-p module-p)
       completion-regexp-list
     (append
-     (if nucleo-completion-regexp-functions
+     (if (nucleo-completion--regexp-expanders)
          (apply #'append (nucleo-completion--term-regexp-groups needle))
        (mapcar #'nucleo-completion--term-fuzzy-regexp
                (nucleo-completion--terms needle)))
@@ -2032,17 +2100,36 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
   (let* ((history-ranking (nucleo-completion--history-ranking prefix all))
          (history-ranks (car-safe history-ranking))
          (history-rank-table (cdr-safe history-ranking))
+         (fast-p (and expanded-regexp-p nucleo-completion-languages
+                      (null nucleo-completion-regexp-functions)
+                      (not completion-ignore-case)
+                      (nthcdr (1- nucleo-completion--native-regexp-minimum-candidates)
+                              all)
+                      (nucleo-completion--module-ready-p)
+                      (fboundp 'nucleo-completion-candidates-with-regexp-groups)))
          (module-history-p (and history-ranks
-                                (nucleo-completion--module-supports-history-p)))
-         (need-full-scores
-          (or need-full-scores
-              (and history-ranks (not module-history-p))))
+                                (or fast-p
+                                    (nucleo-completion--module-supports-history-p))))
+         (requested-full-scores need-full-scores)
+         (need-full-scores (or need-full-scores
+                               (and history-ranks (not module-history-p))))
          (bundle (nucleo-completion--module-results
-                  needle all completion-ignore-case
-                  highlight-limit need-full-scores
-                  (and module-history-p history-ranks)))
-         top-info
-         full-scores)
+                  needle all completion-ignore-case highlight-limit need-full-scores
+                  (and module-history-p history-ranks)
+                  (and fast-p (nucleo-completion--regexp-only-regexp-groups needle))))
+         extra top-info full-scores)
+    (when (eq bundle 'nucleo-completion-unsupported-regexp)
+      (setq fast-p nil
+            module-history-p (and history-ranks
+                                  (nucleo-completion--module-supports-history-p))
+            need-full-scores (or requested-full-scores
+                                 (and history-ranks (not module-history-p)))
+            bundle (nucleo-completion--module-results
+                    needle all completion-ignore-case highlight-limit need-full-scores
+                    (and module-history-p history-ranks))))
+    (when (and fast-p (not (nucleo-completion--bundle-interrupted-p bundle)))
+      (setq extra (nth 3 bundle)
+            bundle (list (nth 0 bundle) (nth 1 bundle) (nth 2 bundle))))
     (when (nucleo-completion--bundle-interrupted-p bundle)
       (throw 'nucleo-completion-interrupted
              nucleo-completion--interrupted-sentinel))
@@ -2056,7 +2143,8 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
              needle all bundle
              (and (> highlight-limit 0)
                   nucleo-completion-highlight-score-bands
-                  (not need-full-scores)))))
+                  (not need-full-scores))
+             fast-p extra)))
     (setq top-info (nucleo-completion--bundle-top-info bundle)
           full-scores (nucleo-completion--bundle-full-scores bundle))
     (list (nucleo-completion--bundle-candidates bundle)
@@ -2080,24 +2168,33 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
     (list (nucleo-completion--fallback-filter needle all prefix)
           nil nil nil))))
 
+(cl-defstruct (nucleo-completion--context
+               (:constructor nucleo-completion--make-context))
+  "Source and filtering settings for an interrupt-reusable result."
+  table predicate regexp-list ignore-case regexp-functions languages expanders
+  regexp-minimum-term-length sort-history sort-length sort-alphabetically
+  regexp-priority)
+
 (defun nucleo-completion--completion-context (table pred regexp-list)
   "Return the completion context for an interrupt-reusable result.
 TABLE and PRED identify the completion source.  REGEXP-LIST is
 the caller's external `completion-regexp-list'.  The remaining
 values are filtering options that can change which candidates are
 available or how the reusable snapshot is ordered."
-  (list table
-        pred
-        (if (listp regexp-list) (copy-sequence regexp-list) regexp-list)
-        completion-ignore-case
-        (if (listp nucleo-completion-regexp-functions)
-            (copy-sequence nucleo-completion-regexp-functions)
-          nucleo-completion-regexp-functions)
-        (nucleo-completion--regexp-minimum-term-length)
-        nucleo-completion-sort-ties-by-history
-        nucleo-completion-sort-ties-by-length
-        nucleo-completion-sort-ties-alphabetically
-        nucleo-completion-regexp-only-match-priority))
+  (nucleo-completion--make-context
+   :table table :predicate pred
+   :regexp-list (if (listp regexp-list) (copy-sequence regexp-list) regexp-list)
+   :ignore-case completion-ignore-case
+   :regexp-functions (if (listp nucleo-completion-regexp-functions)
+                         (copy-sequence nucleo-completion-regexp-functions)
+                       nucleo-completion-regexp-functions)
+   :languages (copy-sequence nucleo-completion-languages)
+   :expanders (nucleo-completion--regexp-expanders)
+   :regexp-minimum-term-length (nucleo-completion--regexp-minimum-term-length)
+   :sort-history nucleo-completion-sort-ties-by-history
+   :sort-length nucleo-completion-sort-ties-by-length
+   :sort-alphabetically nucleo-completion-sort-ties-alphabetically
+   :regexp-priority nucleo-completion-regexp-only-match-priority))
 
 (defun nucleo-completion--completion-context-matches-p
     (context table pred regexp-list)
@@ -2105,23 +2202,27 @@ available or how the reusable snapshot is ordered."
 The completion table and predicate are compared by identity.  A
 matching prefix is not enough: interrupt reuse must not leak
 candidates from a different completion source."
-  (pcase context
-    (`(,old-table ,old-pred ,old-regexp-list ,old-ignore-case
-                  ,old-regexp-functions ,old-regexp-minimum-term-length
-                  ,old-sort-history ,old-sort-length ,old-sort-alpha
-                  ,old-regexp-priority)
-     (and (eq old-table table)
-          (eq old-pred pred)
-          (equal old-regexp-list regexp-list)
-          (eq old-ignore-case completion-ignore-case)
-          (equal old-regexp-functions nucleo-completion-regexp-functions)
-          (equal old-regexp-minimum-term-length
-                 (nucleo-completion--regexp-minimum-term-length))
-          (eq old-sort-history nucleo-completion-sort-ties-by-history)
-          (eq old-sort-length nucleo-completion-sort-ties-by-length)
-          (eq old-sort-alpha nucleo-completion-sort-ties-alphabetically)
-          (eq old-regexp-priority
-              nucleo-completion-regexp-only-match-priority)))))
+  (and (nucleo-completion--context-p context)
+       (eq (nucleo-completion--context-table context) table)
+       (eq (nucleo-completion--context-predicate context) pred)
+       (equal (nucleo-completion--context-regexp-list context) regexp-list)
+       (eq (nucleo-completion--context-ignore-case context) completion-ignore-case)
+       (equal (nucleo-completion--context-regexp-functions context)
+              nucleo-completion-regexp-functions)
+       (equal (nucleo-completion--context-languages context)
+              nucleo-completion-languages)
+       (equal (nucleo-completion--context-expanders context)
+              (nucleo-completion--regexp-expanders))
+       (equal (nucleo-completion--context-regexp-minimum-term-length context)
+              (nucleo-completion--regexp-minimum-term-length))
+       (eq (nucleo-completion--context-sort-history context)
+           nucleo-completion-sort-ties-by-history)
+       (eq (nucleo-completion--context-sort-length context)
+           nucleo-completion-sort-ties-by-length)
+       (eq (nucleo-completion--context-sort-alphabetically context)
+           nucleo-completion-sort-ties-alphabetically)
+       (eq (nucleo-completion--context-regexp-priority context)
+           nucleo-completion-regexp-only-match-priority)))
 
 (defun nucleo-completion--record-current-result
     (prefix needle all context &optional base-size)
@@ -2149,7 +2250,7 @@ non-monotonic, so only identical regexp-expanded patterns are
 reused."
   (and (stringp nucleo-completion--current-pattern)
        (or (string= nucleo-completion--current-pattern pattern)
-           (and (not nucleo-completion-regexp-functions)
+           (and (not (nucleo-completion--regexp-expanders))
                 (string-prefix-p nucleo-completion--current-pattern
                                  pattern
                                  completion-ignore-case)))))
@@ -2172,22 +2273,43 @@ FILTERING-P becomes the new value of
   (nucleo-completion--clear-completion-state "" nil))
 
 (defun nucleo-completion--install-lazy-highlight
-    (needle top-info max-score)
+    (needle top-info max-score &optional ignore-scores)
   "Install lazy highlighting for NEEDLE.
 TOP-INFO provides score and index lookup data.  MAX-SCORE is used
-for score-band classification."
-  (let ((info-hash (and top-info
+for score-band classification.  IGNORE-SCORES suppresses score properties
+from an older result reused after an interruption.
+The callback retains only this result's pass caches and settings."
+  (let ((regexp-cache nucleo-completion--regexp-cache)
+        (terms-cache nucleo-completion--terms-cache)
+        (languages (copy-sequence nucleo-completion-languages))
+        (regexp-functions (copy-sequence nucleo-completion-regexp-functions))
+        (minimum-term-length nucleo-completion-regexp-minimum-term-length)
+        (ignore-case completion-ignore-case)
+        (score-bands nucleo-completion-highlight-score-bands)
+        (score-ratio nucleo-completion-high-score-ratio)
+        (score-emphasis (copy-sequence nucleo-completion-high-score-emphasis))
+        (info-hash (and top-info
                         (nucleo-completion--top-info-hash top-info)))
         exact-word-regexp-cache)
     (setq completion-lazy-hilit-fn
           (lambda (candidate)
-            (let* ((info (and info-hash
+            (let* ((nucleo-completion--regexp-cache regexp-cache)
+                   (nucleo-completion--terms-cache terms-cache)
+                   (nucleo-completion-languages languages)
+                   (nucleo-completion-regexp-functions regexp-functions)
+                   (nucleo-completion-regexp-minimum-term-length minimum-term-length)
+                   (completion-ignore-case ignore-case)
+                   (nucleo-completion-highlight-score-bands score-bands)
+                   (nucleo-completion-high-score-ratio score-ratio)
+                   (nucleo-completion-high-score-emphasis score-emphasis)
+                   (info (and info-hash
                               (gethash candidate info-hash)))
-                   (score (or (and info
-                                   (nucleo-completion--top-info-score
-                                    info))
-                              (nucleo-completion--candidate-score
-                               candidate)))
+                   (score (and (not ignore-scores)
+                               (or (and info
+                                        (nucleo-completion--top-info-score
+                                         info))
+                                   (nucleo-completion--candidate-score
+                                    candidate))))
                    (indices (and info
                                  (nucleo-completion--top-info-indices
                                   info))))
@@ -2200,16 +2322,6 @@ for score-band classification."
                      exact-word-regexp-cache))
                 (nucleo-completion--highlight-candidate
                  needle (copy-sequence candidate) score max-score indices)))))))
-
-(defun nucleo-completion--install-interrupted-lazy-highlight (needle)
-  "Install lazy highlighting for an interrupt-reused NEEDLE.
-Interrupted reuse filters an older ranked snapshot and has no
-module score or index data for the current input, so avoid using
-stale score properties from the reused candidates."
-  (setq completion-lazy-hilit-fn
-        (lambda (candidate)
-          (nucleo-completion--highlight-candidate
-           needle (copy-sequence candidate)))))
 
 (defun nucleo-completion--highlight-eager
     (needle all top-info max-score highlight-limit)
@@ -2533,18 +2645,16 @@ tie sorting again."
                  (nucleo-completion--current-pattern-refinement-p pattern)
                  (not (string= pattern ""))
                  (not (nucleo-completion--flex-nospace-p pattern)))
-        (let ((candidates
-               (nucleo-completion--with-completion-pass-caches
-                 (nucleo-completion--regexp-filter
-                  pattern nucleo-completion--current-result))))
-          (when candidates
-            (when (bound-and-true-p completion-lazy-hilit)
-              (nucleo-completion--install-interrupted-lazy-highlight
-               pattern))
-            (nucleo-completion--with-base-size
-             prefix
-             candidates
-             nucleo-completion--current-base-size)))))))
+        (nucleo-completion--with-completion-pass-caches
+         (let ((candidates (nucleo-completion--regexp-filter
+                            pattern nucleo-completion--current-result)))
+           (when candidates
+             (when (bound-and-true-p completion-lazy-hilit)
+               (nucleo-completion--install-lazy-highlight pattern nil nil t))
+             (nucleo-completion--with-base-size
+              prefix
+              candidates
+              nucleo-completion--current-base-size))))))))
 
 ;;;###autoload
 (defun nucleo-completion-try-completion (string table pred point)

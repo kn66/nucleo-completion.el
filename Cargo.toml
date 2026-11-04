@@ -1,7 +1,8 @@
 [package]
 name = "nucleo-completion-module"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
+rust-version = "1.85"
 license = "GPL-3.0-or-later"
 description = "Rust dynamic module for nucleo-completion.el"
 
@@ -11,6 +12,9 @@ crate-type = ["cdylib"]
 [dependencies]
 emacs = "0.21"
 nucleo-matcher = "0.3"
+regex = "=1.13.1"
+pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
+rustmigemo = { git = "https://github.com/oguna/rustmigemo", rev = "121101dfcfd9465c998ba53fabe43773b14bf868", version = "0.1.7-dev.0" }
 
 [profile.release]
 codegen-units = 1

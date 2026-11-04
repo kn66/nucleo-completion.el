@@ -31,13 +31,32 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --check
 
-      - name: Install Emacs
+      - name: Install Emacs 27.1
+        if: matrix.emacs == '27.1'
+        uses: purcell/setup-emacs@bdc64dc730ae1fcba200bfd52cb1b4cf6159cbe5 # v8.0
+        with:
+          version: ${{ matrix.emacs }}
+
+      - name: Install distribution Emacs
+        if: matrix.emacs == 'distro'
         run: |
           sudo apt-get update
           sudo apt-get install -y emacs-nox
 
-      - name: Show Emacs version
-        run: emacs -Q --batch --eval '(princ (format "Emacs %s\n" emacs-version))'
+      - name: Verify Emacs version and module support
+        env:
+          EXPECTED_EMACS: ${{ matrix.emacs }}
+        run: |
+          emacs -Q --batch --eval '
+            (progn
+              (princ (format "Emacs %s (%s)\n" emacs-version system-configuration-features))
+              (let ((expected (getenv "EXPECTED_EMACS")))
+                (unless (if (equal expected "distro")
+                            (version< "27.1" emacs-version)
+                          (equal expected emacs-version))
+                  (error "Unexpected Emacs version: %s" emacs-version)))
+              (unless (fboundp (quote module-load))
+                (error "Emacs was built without dynamic module support")))'
 
       - name: Build Rust module
         run: cargo build --release

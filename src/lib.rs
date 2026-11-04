@@ -1,3 +1,8 @@
+mod languages;
+mod regexp;
+
+use regexp::RegexpGroups;
+
 use std::cell::RefCell;
 use std::cmp::Ordering;
 
@@ -14,6 +19,11 @@ emacs::plugin_is_GPL_compatible!();
 )]
 fn init(_: &Env) -> Result<()> {
     Ok(())
+}
+
+struct CandidateScan<'e, T> {
+    matches: Vec<T>,
+    regexp_only: Vec<Value<'e>>,
 }
 
 struct ScoredCandidate<'e> {
@@ -132,9 +142,11 @@ fn score_lisp_candidates<'e>(
     env: &Env,
     pattern: &Pattern,
     candidates: Value<'e>,
-) -> Result<Option<Vec<ScoredCandidate<'e>>>> {
+    regexp_groups: Option<&RegexpGroups>,
+) -> Result<Option<CandidateScan<'e, ScoredCandidate<'e>>>> {
     with_matcher(|matcher| {
         let mut matches = Vec::new();
+        let mut regexp_only = Vec::new();
         let mut list = candidates;
         let mut index = 0;
         let mut utf32_buf = Vec::new();
@@ -146,6 +158,8 @@ fn score_lisp_candidates<'e>(
                 scored_lisp_candidate(pattern, value, index, &text, matcher, &mut utf32_buf)
             {
                 matches.push(candidate);
+            } else if regexp_groups.is_some_and(|groups| groups.is_match(&text)) {
+                regexp_only.push(value);
             }
             list = list.cdr()?;
             index += 1;
@@ -154,7 +168,10 @@ fn score_lisp_candidates<'e>(
             }
         }
 
-        Ok(Some(matches))
+        Ok(Some(CandidateScan {
+            matches,
+            regexp_only,
+        }))
     })
 }
 
@@ -190,9 +207,11 @@ fn score_lisp_candidates_with_ties<'e>(
     candidates: Value<'e>,
     sort_options: SortOptions,
     history_ranks: Option<&[Option<usize>]>,
-) -> Result<Option<Vec<ScoredCandidateWithTies<'e>>>> {
+    regexp_groups: Option<&RegexpGroups>,
+) -> Result<Option<CandidateScan<'e, ScoredCandidateWithTies<'e>>>> {
     with_matcher(|matcher| {
         let mut matches = Vec::new();
+        let mut regexp_only = Vec::new();
         let mut list = candidates;
         let mut index = 0;
         let mut utf32_buf = Vec::new();
@@ -211,6 +230,8 @@ fn score_lisp_candidates_with_ties<'e>(
                 &mut utf32_buf,
             ) {
                 matches.push(candidate);
+            } else if regexp_groups.is_some_and(|groups| groups.is_match(&text)) {
+                regexp_only.push(value);
             }
             list = list.cdr()?;
             index += 1;
@@ -219,7 +240,10 @@ fn score_lisp_candidates_with_ties<'e>(
             }
         }
 
-        Ok(Some(matches))
+        Ok(Some(CandidateScan {
+            matches,
+            regexp_only,
+        }))
     })
 }
 
@@ -354,11 +378,10 @@ fn indices_to_lisp<'e>(env: &'e Env, indices: &[u32]) -> Result<Value<'e>> {
 
 /// Ask Emacs whether new input is waiting.
 ///
-/// The Emacs Lisp `input-pending-p` predicate is the standard way for
-/// modules to cooperate with `while-no-input`: when it returns non-nil
-/// we abandon the rest of the work and let the caller observe an empty
-/// bundle, which the Lisp wrapper interprets as "interrupt and reuse
-/// the previous filter result."  The check is cheap.
+/// The Emacs Lisp `input-pending-p` predicate lets the module cooperate with
+/// `while-no-input`.  Callers abandon the current pass and return an explicit
+/// interrupted bundle, so Lisp can reuse the last compatible filtered result
+/// without confusing interruption with an ordinary search that found no matches.
 fn input_pending(env: &Env) -> Result<bool> {
     let args: [Value; 0] = [];
     Ok(env.call("input-pending-p", args)?.is_not_nil())
@@ -469,6 +492,7 @@ fn build_scored_candidate_bundle<'e, T>(
     matches: &[T],
     highlight_limit: usize,
     return_all_scores: bool,
+    regexp_only: Option<&[Value<'e>]>,
 ) -> Result<Value<'e>>
 where
     T: ScoredCandidateEntry<'e>,
@@ -491,7 +515,25 @@ where
     if input_pending(env)? {
         return interrupted_bundle(env);
     }
-    build_list_3(env, candidates_list, top_info, full_scores)
+    if let Some(regexp_only) = regexp_only {
+        let mut extras = env.intern("nil")?;
+        for (index, &value) in regexp_only.iter().rev().enumerate() {
+            extras = env.cons(value, extras)?;
+            if interrupt_after_processed(env, index + 1)? {
+                return interrupted_bundle(env);
+            }
+        }
+        if input_pending(env)? {
+            return interrupted_bundle(env);
+        }
+        let tail = env.cons(extras, env.intern("nil")?)?;
+        env.cons(
+            candidates_list,
+            env.cons(top_info, env.cons(full_scores, tail)?)?,
+        )
+    } else {
+        build_list_3(env, candidates_list, top_info, full_scores)
+    }
 }
 
 #[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]
@@ -505,6 +547,7 @@ fn candidates_impl<'e>(
     history_ranks: Option<Value<'e>>,
     highlight_limit: Value<'e>,
     return_all_scores: Value<'e>,
+    regexp_groups: Option<&RegexpGroups>,
 ) -> Result<Value<'e>> {
     if input_pending(env)? {
         return interrupted_bundle(env);
@@ -527,6 +570,7 @@ fn candidates_impl<'e>(
             candidates,
             sort_options,
             history_ranks.as_deref(),
+            regexp_groups,
         )? {
             Some(matches) => matches,
             None => return interrupted_bundle(env),
@@ -536,15 +580,23 @@ fn candidates_impl<'e>(
             return interrupted_bundle(env);
         }
 
-        let matches = sort_scored_candidates_with_ties(matches);
+        let regexp_only = matches.regexp_only;
+        let matches = sort_scored_candidates_with_ties(matches.matches);
 
         if input_pending(env)? {
             return interrupted_bundle(env);
         }
 
-        build_scored_candidate_bundle(env, &pattern, &matches, highlight_limit, return_all_scores)
+        build_scored_candidate_bundle(
+            env,
+            &pattern,
+            &matches,
+            highlight_limit,
+            return_all_scores,
+            regexp_groups.map(|_| regexp_only.as_slice()),
+        )
     } else {
-        let matches = match score_lisp_candidates(env, &pattern, candidates)? {
+        let matches = match score_lisp_candidates(env, &pattern, candidates, regexp_groups)? {
             Some(matches) => matches,
             None => return interrupted_bundle(env),
         };
@@ -553,14 +605,46 @@ fn candidates_impl<'e>(
             return interrupted_bundle(env);
         }
 
-        let matches = sort_scored_candidates(matches);
+        let regexp_only = matches.regexp_only;
+        let matches = sort_scored_candidates(matches.matches);
 
         if input_pending(env)? {
             return interrupted_bundle(env);
         }
 
-        build_scored_candidate_bundle(env, &pattern, &matches, highlight_limit, return_all_scores)
+        build_scored_candidate_bundle(
+            env,
+            &pattern,
+            &matches,
+            highlight_limit,
+            return_all_scores,
+            regexp_groups.map(|_| regexp_only.as_slice()),
+        )
     }
+}
+
+/// Return an Emacs regexp for TERM using the bundled Japanese dictionary.
+/// Return nil for unsupported terms or expansions exceeding the size limit.
+#[defun]
+fn migemo_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
+    languages::migemo_regexp(&term).into_lisp(env)
+}
+
+/// Return an Emacs regexp for toneless pinyin TERM.
+/// Accept ü, v, or u: and apostrophe syllable boundaries.  Include
+/// alternative readings and a partial final syllable; return nil
+/// for unsupported terms or expansions exceeding the size limit.
+#[defun]
+fn pinyin_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
+    languages::pinyin_regexp(&term).into_lisp(env)
+}
+
+/// Return an Emacs regexp for Hangul initial-consonant TERM.
+/// Allow mixed syllables and ASCII alphanumeric literals; return nil when
+/// there is no initial consonant or TERM contains unsupported characters.
+#[defun]
+fn hangul_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
+    languages::hangul_regexp(&term).into_lisp(env)
 }
 
 #[defun]
@@ -590,6 +674,7 @@ fn candidates<'e>(
         None,
         highlight_limit,
         return_all_scores,
+        None,
     )
 }
 
@@ -616,6 +701,47 @@ fn candidates_with_history<'e>(
         Some(history_ranks),
         highlight_limit,
         return_all_scores,
+        None,
+    )
+}
+
+/// Return fuzzy matches and candidates matching every regexp group but not fuzzy.
+/// Return `nucleo-completion-unsupported-regexp` when native matching cannot
+/// preserve Emacs regexp semantics, allowing Lisp to use its original path.
+#[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]
+#[defun]
+fn candidates_with_regexp_groups<'e>(
+    env: &'e Env,
+    pattern: String,
+    candidates: Value<'e>,
+    ignore_case: Value<'e>,
+    sort_ties_by_length: Value<'e>,
+    sort_ties_alphabetically: Value<'e>,
+    history_ranks: Value<'e>,
+    highlight_limit: Value<'e>,
+    return_all_scores: Value<'e>,
+    regexp_groups: Value<'e>,
+) -> Result<Value<'e>> {
+    if input_pending(env)? {
+        return interrupted_bundle(env);
+    }
+    if ignore_case.is_not_nil() {
+        return env.intern("nucleo-completion-unsupported-regexp");
+    }
+    let Some(groups) = RegexpGroups::from_lisp(regexp_groups)? else {
+        return env.intern("nucleo-completion-unsupported-regexp");
+    };
+    candidates_impl(
+        env,
+        pattern,
+        candidates,
+        ignore_case,
+        sort_ties_by_length,
+        sort_ties_alphabetically,
+        history_ranks.is_not_nil().then_some(history_ranks),
+        highlight_limit,
+        return_all_scores,
+        Some(&groups),
     )
 }
 

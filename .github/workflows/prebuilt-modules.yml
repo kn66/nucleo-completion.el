@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: GitHub Release tag to upload assets to, for example v0.1.15
+        description: GitHub Release tag to upload assets to, for example v0.1.16
         required: true
 
 jobs:
@@ -141,7 +141,17 @@ jobs:
                                            "fb" (list "fb" "foo-baz" "bar")
                                            nil nil nil 0 nil))
                                      (list "fb" "foo-baz"))
-                        (error "loaded module did not score candidates")))'
+                        (error "loaded module did not score candidates"))
+                      (dolist (case (quote ((nucleo-completion-migemo-regexp "kensaku" "検索")
+                                            (nucleo-completion-pinyin-regexp "zhongguo" "中国")
+                                            (nucleo-completion-hangul-regexp "ㄱㅅ" "감사"))))
+                        (unless (string-match-p (funcall (car case) (cadr case)) (caddr case))
+                          (error "loaded module language search failed: %S" case)))
+                      (unless (equal (nth 3 (nucleo-completion-candidates-with-regexp-groups
+                                             "nihon" (list "日本") nil nil nil nil 0 nil
+                                             (list (list "日本"))))
+                                     (list "日本"))
+                        (error "loaded module combined language scan failed")))'
 
       - name: Verify module loads (Windows)
         if: runner.os == 'Windows'
@@ -171,7 +181,17 @@ jobs:
                                  "fb" (list "fb" "foo-baz" "bar")
                                  nil nil nil 0 nil))
                            (list "fb" "foo-baz"))
-              (error "loaded module did not score candidates")))
+              (error "loaded module did not score candidates"))
+            (dolist (case (quote ((nucleo-completion-migemo-regexp "kensaku" "検索")
+                                  (nucleo-completion-pinyin-regexp "zhongguo" "中国")
+                                  (nucleo-completion-hangul-regexp "ㄱㅅ" "감사"))))
+              (unless (string-match-p (funcall (car case) (cadr case)) (caddr case))
+                (error "loaded module language search failed: %S" case)))
+            (unless (equal (nth 3 (nucleo-completion-candidates-with-regexp-groups
+                                   "nihon" (list "日本") nil nil nil nil 0 nil
+                                   (list (list "日本"))))
+                           (list "日本"))
+              (error "loaded module combined language scan failed")))
           '@
           & $emacs -Q --batch `
             -L . `
@@ -187,6 +207,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.library }} \
             "dist/${asset}"
+          cat THIRD-PARTY-NOTICES LICENSE LICENSES/* > "dist/${asset}.licenses.txt"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "dist/${asset}" > "dist/${asset}.sha256"
           else

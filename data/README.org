@@ -1,0 +1,27 @@
+#+title: Bundled Migemo dictionary
+
+~migemo-compact-dict~ is the compact dictionary from the official
+~yet-another-migemo-dict~ v0.6 release:
+
+https://github.com/oguna/yet-another-migemo-dict/releases/tag/v0.6
+
+Archive:
+https://github.com/oguna/yet-another-migemo-dict/releases/download/v0.6/migemo-compact-dict.zip
+
+- Archive SHA256: ~8c7e0dac0797d215ef4ff93370ab368bf347bb7a44b7f416614e9401cac84cc0~
+- Dictionary SHA256: ~402baabd752bfd04e48609fa02bcdd99e2853ba9a1d2959c5deb6f35c30e371e~
+- Dictionary size: 1,384,379 bytes
+- Source dictionary projects: Mozc and UniDic
+- License: BSD-3-Clause; verbatim texts from this release archive are in
+  ~../LICENSES/migemo-dict-LICENSE~, ~migemo-dict-LICENSE_Mozc~, and
+  ~migemo-dict-LICENSE_UniDic~.
+
+The file is embedded at compile time by ~src/languages.rs~.  Runtime use and
+local builds do not download a dictionary.  Rust dependencies are resolved by
+Cargo separately.
+
+To update, choose an explicit upstream release, download its compact ZIP,
+verify and record the archive hash, then replace the dictionary and its three
+license files from that same archive.  Update this provenance record and run
+Rust tests and the native language ERT tests.  Do not substitute the C/Migemo
+text dictionary or a compact dictionary from a different source silently.
