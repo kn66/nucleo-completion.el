@@ -1239,7 +1239,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                  (setq calls (1+ calls))
                  (funcall original-ensure bundle))))
       (pcase-let ((`(,all ,_bundle ,_top-info ,_full-scores)
-                   (nucleo-completion--module-completion-results
+                   (nucleo-completion--legacy-module-completion-results
                     "" "fo" '("foo" "fob") nil 0 t)))
         (should (equal (nucleo-completion-tests--plain all)
                        '("foo" "fob")))
@@ -2863,7 +2863,9 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (nucleo-completion-sort-ties-alphabetically nil)
         (minibuffer-history-variable 'nucleo-completion-tests-history)
         (nucleo-completion-tests-history '("alpha" "beta")))
-    (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
+    (cl-letf (((symbol-function 'nucleo-completion--native-completion-results)
+               (lambda (&rest _) 'nucleo-completion-unsupported-regexp))
+              ((symbol-function 'nucleo-completion--module-supports-history-p)
                (lambda () t))
               ((symbol-function 'minibufferp)
                (lambda (&rest _) t))
@@ -2890,7 +2892,9 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (nucleo-completion-sort-ties-alphabetically nil)
         (corfu-history-mode t)
         (corfu-history '("alpha" "beta")))
-    (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
+    (cl-letf (((symbol-function 'nucleo-completion--native-completion-results)
+               (lambda (&rest _) 'nucleo-completion-unsupported-regexp))
+              ((symbol-function 'nucleo-completion--module-supports-history-p)
                (lambda () t))
               ((symbol-function 'minibufferp)
                (lambda (&rest _) nil))
@@ -2920,7 +2924,9 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (nucleo-completion-sort-ties-alphabetically nil)
         (minibuffer-history-variable 'nucleo-completion-tests-history)
         (nucleo-completion-tests-history '("aardvark" "alpha" "beta")))
-    (cl-letf (((symbol-function 'nucleo-completion--module-supports-history-p)
+    (cl-letf (((symbol-function 'nucleo-completion--native-completion-results)
+               (lambda (&rest _) 'nucleo-completion-unsupported-regexp))
+              ((symbol-function 'nucleo-completion--module-supports-history-p)
                (lambda () nil))
               ((symbol-function 'minibufferp)
                (lambda (&rest _) t))
@@ -3599,7 +3605,7 @@ invocation."
                  (lambda (_needle _all _case _length _alpha _history _limit scores groups)
                    (should (equal groups '(("日本語"))))
                    (list '("nihon") '(("nihon" 10 (0))) (and scores '(10)) extras))))
-        (let* ((result (nucleo-completion--module-completion-results
+        (let* ((result (nucleo-completion--legacy-module-completion-results
                         "" "nihon" '("nihon" "日本語") t 1 t))
                (bundle (nth 1 result)))
           (should (equal (nucleo-completion-tests--plain (car bundle))
@@ -3621,7 +3627,7 @@ invocation."
                (lambda (&rest _) (push 'legacy calls) (list nil nil nil)))
               ((symbol-function 'nucleo-completion--regexp-only-candidates)
                (lambda (&rest _) (push 'scan calls) '("x"))))
-      (should (equal (car (nucleo-completion--module-completion-results
+      (should (equal (car (nucleo-completion--legacy-module-completion-results
                            "" "x" '("x") t 0 nil)) '("x")))
       (should (equal calls '(scan legacy native))))))
 
@@ -3637,7 +3643,7 @@ invocation."
                  (lambda (&rest _) (error "Unexpected native regexp call")))
                 ((symbol-function 'nucleo-completion-candidates) (lambda (&rest _) (list nil nil nil)))
                 ((symbol-function 'nucleo-completion--regexp-only-candidates) (lambda (&rest _) nil)))
-        (nucleo-completion--module-completion-results "" "x" '("x") t 0 nil)))))
+        (nucleo-completion--legacy-module-completion-results "" "x" '("x") t 0 nil)))))
 
 (ert-deftest nucleo-completion-native-regexp-groups-restores-extra-test ()
   (let* ((tofu (string #x3fff80))
@@ -3664,7 +3670,7 @@ invocation."
               ((symbol-function 'nucleo-completion-candidates-with-regexp-groups)
                (lambda (&rest _) (error "Scrubbed regexp scan is unsafe")))
               ((symbol-function 'nucleo-completion-candidates) (lambda (&rest _) (list nil nil nil))))
-      (should-not (car (nucleo-completion--module-completion-results
+      (should-not (car (nucleo-completion--legacy-module-completion-results
                         "" "nihon" (list candidate) t 0 nil))))))
 
 (ert-deftest nucleo-completion-native-regexp-groups-interrupted-test ()
@@ -3678,7 +3684,7 @@ invocation."
               ((symbol-function 'nucleo-completion-candidates-with-regexp-groups)
                (lambda (&rest _) (list nucleo-completion--interrupted-sentinel nil nil nil))))
       (should (eq (catch 'nucleo-completion-interrupted
-                    (nucleo-completion--module-completion-results "" "x" '("x") t 0 nil))
+                    (nucleo-completion--legacy-module-completion-results "" "x" '("x") t 0 nil))
                   nucleo-completion--interrupted-sentinel)))))
 
 (ert-deftest nucleo-completion-native-regexp-groups-match-legacy-test ()
@@ -3702,8 +3708,8 @@ invocation."
             (let* ((nucleo-completion-regexp-only-match-priority priority)
                    (legacy (cl-letf (((symbol-function 'nucleo-completion-candidates-with-regexp-groups)
                                       (lambda (&rest _) 'nucleo-completion-unsupported-regexp)))
-                             (nucleo-completion--module-completion-results "" needle all t 5 scores)))
-                   (native (nucleo-completion--module-completion-results "" needle all t 5 scores)))
+                             (nucleo-completion--legacy-module-completion-results "" needle all t 5 scores)))
+                   (native (nucleo-completion--legacy-module-completion-results "" needle all t 5 scores)))
               (should (equal-including-properties legacy native)))))))))
 
 (ert-deftest nucleo-completion-native-regexp-groups-small-list-test ()
@@ -3720,7 +3726,7 @@ invocation."
                (lambda (&rest _) (list '("x") nil nil)))
               ((symbol-function 'nucleo-completion--regexp-only-candidates)
                (lambda (&rest _) '("日本"))))
-      (should (equal (car (nucleo-completion--module-completion-results
+      (should (equal (car (nucleo-completion--legacy-module-completion-results
                            "" "x" '("x" "日本") t 0 nil))
                      '("日本" "x"))))))
 
@@ -3750,5 +3756,240 @@ invocation."
                (nucleo-completion-candidates-with-regexp-groups
                 "no-match" candidates nil nil nil nil 0 nil '(("日本")))))
       (should (= calls 10)))))
+
+
+(defun nucleo-completion-tests--equal-with-properties (left right)
+  "Compare nested LEFT and RIGHT, including string text properties."
+  (cond ((and (stringp left) (stringp right))
+         (equal-including-properties left right))
+        ((and (consp left) (consp right))
+         (and (nucleo-completion-tests--equal-with-properties (car left) (car right))
+              (nucleo-completion-tests--equal-with-properties (cdr left) (cdr right))))
+        (t (equal left right))))
+
+(ert-deftest nucleo-completion-native-options-match-legacy-test ()
+  "Optimized history and regexp results retain the legacy bundle semantics."
+  (skip-unless (and (fboundp 'nucleo-completion-candidates-with-options)
+                    (fboundp 'nucleo-completion-migemo-regexp)))
+  (let* ((first (propertize "日本" 'source 1))
+         (second (propertize "日本" 'source 2))
+         (all (list "nihon" first "nihon.txt" second "other"))
+         (nucleo-completion--native-regexp-minimum-candidates 1)
+         (nucleo-completion-languages '(japanese))
+         (nucleo-completion-regexp-functions nil)
+         (nucleo-completion-sort-ties-by-history t)
+         (minibuffer-history-variable 'nucleo-completion-tests-history)
+         (nucleo-completion-tests-history '("/tmp/nihon.txt" "/tmp/nihon"))
+         (completion-ignore-case nil))
+    (cl-letf (((symbol-function 'minibufferp) (lambda (&rest _) t)))
+      (dolist (priority '(before after non-ascii))
+        (dolist (bands '(nil t))
+          (dolist (scores '(nil t))
+            (dolist (limit '(0 1 5))
+              (let* ((nucleo-completion-regexp-only-match-priority priority)
+                     (nucleo-completion-highlight-score-bands bands)
+                     (legacy (nucleo-completion--legacy-module-completion-results
+                              "/tmp/" "nihon" all t limit scores))
+                     (native (nucleo-completion--module-completion-results
+                              "/tmp/" "nihon" all t limit scores)))
+                (should (nucleo-completion-tests--equal-with-properties legacy native))
+                (unless bands
+                  (should (memq first (car native)))
+                  (should (memq second (car native))))))))))))
+
+(ert-deftest nucleo-completion-native-options-no-fuzzy-matches-test ()
+  (skip-unless (and (fboundp 'nucleo-completion-candidates-with-options)
+                    (fboundp 'nucleo-completion-migemo-regexp)))
+  (let ((nucleo-completion--native-regexp-minimum-candidates 1)
+        (nucleo-completion-languages '(japanese))
+        (nucleo-completion-regexp-functions nil)
+        (completion-ignore-case nil))
+    (dolist (all (list (list (propertize "日本" 'source 1) "日本語")
+                       '("unrelated" "other")))
+      (dolist (priority '(before after non-ascii))
+        (dolist (bands '(nil t))
+          (dolist (scores '(nil t))
+            (dolist (limit '(0 2))
+              (let ((nucleo-completion-regexp-only-match-priority priority)
+                    (nucleo-completion-highlight-score-bands bands))
+                (should
+                 (nucleo-completion-tests--equal-with-properties
+                  (nucleo-completion--legacy-module-completion-results
+                   "" "nihon" all t limit scores)
+                  (nucleo-completion--module-completion-results
+                   "" "nihon" all t limit scores)))))))))))
+
+(ert-deftest nucleo-completion-native-options-corfu-history-test ()
+  (skip-unless (fboundp 'nucleo-completion-candidates-with-options))
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (corfu-history-mode t)
+        (corfu-history '("a-b" "a_b"))
+        (all '("a_b" "a-b" "ab" "AB")))
+    (cl-letf (((symbol-function 'minibufferp) (lambda (&rest _) nil)))
+      (dolist (completion-ignore-case '(nil t))
+        (dolist (by-length '(nil t))
+          (dolist (alphabetically '(nil t))
+            (let ((nucleo-completion-sort-ties-by-length by-length)
+                  (nucleo-completion-sort-ties-alphabetically alphabetically))
+              (should (nucleo-completion-tests--equal-with-properties
+                       (nucleo-completion--legacy-module-completion-results
+                        "" "ab" all nil 2 t)
+                       (nucleo-completion--module-completion-results
+                        "" "ab" all nil 2 t))))))))))
+
+(ert-deftest nucleo-completion-native-options-avoids-lisp-ranking-and-merge-test ()
+  (skip-unless (fboundp 'nucleo-completion-candidates-with-options))
+  (let ((nucleo-completion-sort-ties-by-history t)
+        (corfu-history-mode t)
+        (corfu-history '("ab"))
+        (nucleo-completion--native-regexp-minimum-candidates 1)
+        (nucleo-completion-languages '(japanese))
+        (nucleo-completion-regexp-functions nil)
+        (completion-ignore-case nil))
+    (cl-letf (((symbol-function 'minibufferp) (lambda (&rest _) nil))
+              ((symbol-function 'nucleo-completion--regexp-only-regexp-groups)
+               (lambda (_) '(("日本"))))
+              ((symbol-function 'nucleo-completion--history-ranking)
+               (lambda (&rest _) (error "Unexpected candidate history scan")))
+              ((symbol-function 'nucleo-completion--merge-regexp-only-matches)
+               (lambda (&rest _) (error "Unexpected Lisp merge"))))
+      (should (equal (car (nucleo-completion--module-completion-results
+                           "" "ab" '("ab" "日本") t 1 nil))
+                     '("日本" "ab"))))))
+
+(ert-deftest nucleo-completion-native-options-scrubbing-falls-back-test ()
+  (let ((nucleo-completion-scrub-non-unicode-candidates t)
+        (nucleo-completion-sort-ties-by-history t))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p) (lambda () t))
+              ((symbol-function 'nucleo-completion-candidates-with-options)
+               (lambda (&rest _) (error "Explicit scrubbing must use legacy path"))))
+      (should (eq (nucleo-completion--native-completion-results
+                   "" "a" '("a" "ab") nil 0 nil)
+                  'nucleo-completion-unsupported-regexp)))))
+
+(ert-deftest nucleo-completion-native-options-non-unicode-history-falls-back-test ()
+  (let ((rank-table (make-hash-table :test #'equal)))
+    (puthash (string #x3fff80) 0 rank-table)
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p) (lambda () t))
+              ((symbol-function 'nucleo-completion--history-rank-table)
+               (lambda (_) rank-table))
+              ((symbol-function 'nucleo-completion-candidates-with-options)
+               (lambda (&rest _) (error "Non-Unicode history must use legacy path"))))
+      (should (eq (nucleo-completion--native-completion-results
+                   "" "a" '("a" "ab") nil 0 nil)
+                  'nucleo-completion-unsupported-regexp)))))
+
+(ert-deftest nucleo-completion-native-options-interrupted-test ()
+  (let ((rank-table (make-hash-table :test #'equal)))
+    (puthash "ab" 0 rank-table)
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p) (lambda () t))
+              ((symbol-function 'nucleo-completion--history-rank-table)
+               (lambda (_) rank-table))
+              ((symbol-function 'nucleo-completion-candidates-with-options)
+               (lambda (&rest _)
+                 (list nucleo-completion--interrupted-sentinel nil nil))))
+      (should (eq (catch 'nucleo-completion-interrupted
+                    (nucleo-completion--module-completion-results
+                     "" "a" '("a" "ab") nil 0 nil))
+                  nucleo-completion--interrupted-sentinel)))))
+
+(ert-deftest nucleo-completion-native-options-unicode-error-falls-back-test ()
+  (let ((rank-table (make-hash-table :test #'equal))
+        (candidate (concat "a" (string #x3fff80))))
+    (puthash "a" 0 rank-table)
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p) (lambda () t))
+              ((symbol-function 'nucleo-completion--history-rank-table)
+               (lambda (_) rank-table))
+              ((symbol-function 'nucleo-completion-candidates-with-options)
+               (lambda (&rest _) (signal 'wrong-type-argument
+                                         (list 'unicode-string-p candidate))))
+              ((symbol-function 'nucleo-completion--legacy-module-completion-results)
+               (lambda (&rest _) 'legacy-result)))
+      (should (eq (nucleo-completion--module-completion-results
+                   "" "a" (list candidate "ab") nil 0 nil)
+                  'legacy-result)))))
+
+(ert-deftest nucleo-completion-native-options-unsupported-regexp-retries-test ()
+  (let ((nucleo-completion--native-regexp-minimum-candidates 1)
+        (nucleo-completion-languages '(japanese))
+        (nucleo-completion-regexp-functions nil)
+        (completion-ignore-case nil)
+        (calls nil))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p) (lambda () t))
+              ((symbol-function 'nucleo-completion--history-rank-table) (lambda (_) nil))
+              ((symbol-function 'nucleo-completion--regexp-only-regexp-groups)
+               (lambda (_) '(("日本"))))
+              ((symbol-function 'nucleo-completion-candidates-with-options)
+               (lambda (&rest args)
+                 (push (nth 8 args) calls)
+                 (if (nth 8 args) 'nucleo-completion-unsupported-regexp
+                   (list '("ab") nil nil))))
+              ((symbol-function 'nucleo-completion--regexp-only-candidates)
+               (lambda (&rest _) '("日本")))
+              ((symbol-function 'nucleo-completion--legacy-module-completion-results)
+               (lambda (&rest _) (error "Should retry the new fuzzy API"))))
+      (should (equal (car (nucleo-completion--module-completion-results
+                           "" "ab" '("ab" "日本") t 0 nil))
+                     '("日本" "ab")))
+      (should (equal (nreverse calls) '((("日本")) nil))))))
+
+(ert-deftest nucleo-completion-native-options-history-decode-interruption-test ()
+  (skip-unless (fboundp 'nucleo-completion-candidates-with-options))
+  (let ((calls 0)
+        (history (cl-loop for i below 300 collect (cons (format "h%d" i) i))))
+    (cl-letf (((symbol-function 'input-pending-p)
+               (lambda (&optional _) (>= (cl-incf calls) 2))))
+      ;; The first check is at entry; the second is while decoding history.
+      (should (equal (nucleo-completion-candidates-with-options
+                      "a" '("a") nil nil nil history 0 nil nil 'before nil)
+                     (list nucleo-completion--interrupted-sentinel nil nil)))
+      (should (= calls 2)))))
+
+(ert-deftest nucleo-completion-native-options-extra-assembly-interruption-test ()
+  (skip-unless (fboundp 'nucleo-completion-candidates-with-options))
+  (let ((calls 0)
+        (candidates (make-list 600 "日本")))
+    (cl-letf (((symbol-function 'input-pending-p)
+               (lambda (&optional _) (>= (cl-incf calls) 8))))
+      ;; Checks 6 and 7 partition extras; check 8 builds their result list.
+      (should (equal (nucleo-completion-candidates-with-options
+                      "no-match" candidates nil nil nil nil 0 nil
+                      '(("日本")) 'before nil)
+                     (list nucleo-completion--interrupted-sentinel nil nil)))
+      (should (= calls 8)))))
+
+(ert-deftest nucleo-completion-native-options-non-unicode-real-fallback-test ()
+  (skip-unless (fboundp 'nucleo-completion-candidates-with-options))
+  (let* ((first (concat "same" (string #x200004)))
+         (second (concat "same" (string #x200005)))
+         (all (list first second "same"))
+         (nucleo-completion-sort-ties-by-history t)
+         (minibuffer-history-variable 'nucleo-completion-tests-history)
+         (nucleo-completion-scrub-non-unicode-candidates nil)
+         (nucleo-completion--force-scrub-non-unicode-candidates nil)
+         (completion-ignore-case nil))
+    (cl-letf (((symbol-function 'minibufferp) (lambda (&rest _) t)))
+      ;; The first case rejects history keys; the second reaches the module's
+      ;; Unicode encoder before retrying through the scrub-capable legacy path.
+      (dolist (nucleo-completion-tests-history
+               (list (list second first) '("same")))
+        (should (nucleo-completion-tests--equal-with-properties
+                 (nucleo-completion--legacy-module-completion-results
+                  "" "same" all nil 2 nil)
+                 (nucleo-completion--module-completion-results
+                  "" "same" all nil 2 nil)))))))
+
+(ert-deftest nucleo-completion-native-options-unavailable-falls-back-test ()
+  (let ((original-fboundp (symbol-function 'fboundp)))
+    (cl-letf (((symbol-function 'nucleo-completion--module-ready-p) (lambda () t))
+              ((symbol-function 'fboundp)
+               (lambda (symbol)
+                 (and (not (eq symbol 'nucleo-completion-candidates-with-options))
+                      (funcall original-fboundp symbol))))
+              ((symbol-function 'nucleo-completion--legacy-module-completion-results)
+               (lambda (&rest _) 'legacy-result)))
+      (should (eq (nucleo-completion--module-completion-results
+                   "" "a" '("a" "ab") nil 0 nil)
+                  'legacy-result)))))
 
 ;;; nucleo-completion-tests.el ends here

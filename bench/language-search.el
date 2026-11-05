@@ -9,6 +9,12 @@
 (require 'cl-lib)
 (require 'nucleo-completion)
 
+;; Normal loading prefers an installed release over the development build.
+(module-load (expand-file-name
+              (nucleo-completion--rust-library-name)
+              (expand-file-name "../target/release"
+                                (file-name-directory load-file-name))))
+
 (defvar nucleo-benchmark-iterations 5)
 (defvar nucleo-benchmark-candidate-counts '(10000 100000))
 
@@ -53,8 +59,13 @@
             (princ (format "%d candidates; %s; %S; legacy: " count query languages))
             (unwind-protect
                 (progn
-                  (fmakunbound 'nucleo-completion-candidates-with-regexp-groups)
-                  (nucleo-benchmark--search query candidates))
+                  ;; Exercise the original Lisp regexp scan, including when
+                  ;; the newer merged-result entry point is available.
+                  (cl-letf (((symbol-function 'nucleo-completion--native-completion-results)
+                             (lambda (&rest _)
+                               'nucleo-completion-unsupported-regexp)))
+                    (fmakunbound 'nucleo-completion-candidates-with-regexp-groups)
+                    (nucleo-benchmark--search query candidates)))
               (when native-function
                 (fset 'nucleo-completion-candidates-with-regexp-groups native-function)))
             (when native-function

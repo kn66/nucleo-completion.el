@@ -46,3 +46,44 @@ conservative heuristic, not a guarantee about the crossover on every machine.
 
 These figures describe this synthetic workload, not GUI latency or all real
 completion tables.  Re-run locally when changing the matcher or candidate data.
+
+* Native history lookup and merging, 2026-11-05
+
+Build the release module, byte-compile the Lisp package, then run:
+
+#+begin_src sh
+  emacs -Q --batch -L . --eval '(byte-compile-file "nucleo-completion.el")'
+  emacs -Q --batch -L . \
+    --eval '(setq nucleo-benchmark-iterations 20 nucleo-benchmark-rounds 5)' \
+    -l bench/native-postprocessing.el
+#+end_src
+
+Both benchmark scripts load the working tree's release binary explicitly,
+avoiding an installed module with the same version.  This comparison keeps the
+previous combined regexp scan enabled in the legacy path and disables only the
+new history lookup and merged-result API.
+
+The synthetic candidates are 80% ASCII file names, 10% ~kensaku~ names and 10%
+Japanese ~検索結果~ names.  The query is ~kensaku~.  The history workloads use
+100 matching Corfu history entries.  Language workloads enable Japanese search
+and the ~non-ascii~ priority.  Eager highlighting uses the default 25-candidate
+limit; score bands, length sorting and alphabetical sorting are disabled.
+Each round warms both paths, collects garbage before each measurement and
+alternates measurement order.  Reported times are the median of five rounds
+of 20 completions, in milliseconds per completion.
+
+GNU Emacs 31.1, Linux x86_64, release profile, byte-compiled Lisp, 128 MiB GC
+threshold; no GC occurred during timed measurements:
+
+| Candidates | Workload                  | Previous API | Native options |
+|------------+---------------------------+--------------+----------------|
+|      10000 | History                   |         6.40 |           4.06 |
+|      10000 | Language merging          |         4.67 |           4.64 |
+|      10000 | History + language        |         6.98 |           4.46 |
+|     100000 | History                   |        74.67 |          49.16 |
+|     100000 | Language merging          |        44.00 |          43.29 |
+|     100000 | History + language        |        66.16 |          42.18 |
+
+History-enabled workloads improved by about 34–36% in this run.  Merging alone
+made a small difference with this candidate distribution.  These are local
+synthetic measurements, not a guarantee of GUI latency or other workloads.

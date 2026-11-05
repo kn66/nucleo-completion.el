@@ -5,6 +5,7 @@ use regexp::RegexpGroups;
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use emacs::{defun, Env, IntoLisp, Result, Value};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -23,7 +24,12 @@ fn init(_: &Env) -> Result<()> {
 
 struct CandidateScan<'e, T> {
     matches: Vec<T>,
-    regexp_only: Vec<Value<'e>>,
+    regexp_only: Vec<RegexpOnlyCandidate<'e>>,
+}
+
+struct RegexpOnlyCandidate<'e> {
+    value: Value<'e>,
+    non_ascii: bool,
 }
 
 struct ScoredCandidate<'e> {
@@ -138,6 +144,40 @@ fn collect_history_ranks<'e>(history_ranks: Value<'e>) -> Result<Vec<Option<usiz
     Ok(ranks)
 }
 
+enum HistoryRanks<'a> {
+    ByIndex(&'a [Option<usize>]),
+    ByText(&'a HashMap<String, usize>),
+}
+
+impl HistoryRanks<'_> {
+    fn lookup(&self, index: usize, text: &str) -> Option<usize> {
+        match self {
+            Self::ByIndex(ranks) => ranks.get(index).copied().flatten(),
+            Self::ByText(ranks) => ranks.get(text).copied(),
+        }
+    }
+}
+
+fn collect_history_entries<'e>(
+    env: &Env,
+    mut list: Value<'e>,
+) -> Result<Option<HashMap<String, usize>>> {
+    let mut ranks = HashMap::new();
+    let mut count = 0;
+    while list.is_not_nil() {
+        let entry: Value<'e> = list.car()?;
+        let key: String = entry.car::<Value>()?.into_rust()?;
+        let rank: usize = entry.cdr::<Value>()?.into_rust()?;
+        ranks.entry(key).or_insert(rank);
+        list = list.cdr()?;
+        count += 1;
+        if interrupt_after_processed(env, count)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(ranks))
+}
+
 fn score_lisp_candidates<'e>(
     env: &Env,
     pattern: &Pattern,
@@ -159,7 +199,10 @@ fn score_lisp_candidates<'e>(
             {
                 matches.push(candidate);
             } else if regexp_groups.is_some_and(|groups| groups.is_match(&text)) {
-                regexp_only.push(value);
+                regexp_only.push(RegexpOnlyCandidate {
+                    value,
+                    non_ascii: !text.is_ascii(),
+                });
             }
             list = list.cdr()?;
             index += 1;
@@ -206,7 +249,7 @@ fn score_lisp_candidates_with_ties<'e>(
     pattern: &Pattern,
     candidates: Value<'e>,
     sort_options: SortOptions,
-    history_ranks: Option<&[Option<usize>]>,
+    history_ranks: Option<&HistoryRanks>,
     regexp_groups: Option<&RegexpGroups>,
 ) -> Result<Option<CandidateScan<'e, ScoredCandidateWithTies<'e>>>> {
     with_matcher(|matcher| {
@@ -231,7 +274,10 @@ fn score_lisp_candidates_with_ties<'e>(
             ) {
                 matches.push(candidate);
             } else if regexp_groups.is_some_and(|groups| groups.is_match(&text)) {
-                regexp_only.push(value);
+                regexp_only.push(RegexpOnlyCandidate {
+                    value,
+                    non_ascii: !text.is_ascii(),
+                });
             }
             list = list.cdr()?;
             index += 1;
@@ -258,7 +304,7 @@ fn scored_lisp_candidate_with_ties<'e>(
     text: &str,
     matcher: &mut Matcher,
     sort_options: SortOptions,
-    history_ranks: Option<&[Option<usize>]>,
+    history_ranks: Option<&HistoryRanks>,
     utf32_buf: &mut Vec<char>,
 ) -> Option<ScoredCandidateWithTies<'e>> {
     pattern
@@ -268,7 +314,7 @@ fn scored_lisp_candidate_with_ties<'e>(
             sort_data: CandidateSortData {
                 index,
                 score,
-                history_rank: history_ranks.and_then(|ranks| ranks.get(index).copied().flatten()),
+                history_rank: history_ranks.and_then(|ranks| ranks.lookup(index, text)),
                 length: sort_options.ties_by_length.then(|| text.chars().count()),
                 alphabetical_key: candidate_alphabetical_key(text, sort_options),
             },
@@ -432,8 +478,21 @@ fn build_scored_top_info<'e, T>(
 where
     T: ScoredCandidateEntry<'e>,
 {
+    build_scored_top_info_onto(env, pattern, matches, highlight_limit, env.intern("nil")?)
+}
+
+fn build_scored_top_info_onto<'e, T>(
+    env: &'e Env,
+    pattern: &Pattern,
+    matches: &[T],
+    highlight_limit: usize,
+    tail: Value<'e>,
+) -> Result<Option<Value<'e>>>
+where
+    T: ScoredCandidateEntry<'e>,
+{
     let nil = env.intern("nil")?;
-    let mut top_info = nil;
+    let mut top_info = tail;
     let mut scratch = MatchIndicesScratch::default();
     let mut processed_count = 0;
     for scored in matches.iter().take(highlight_limit).rev() {
@@ -492,7 +551,7 @@ fn build_scored_candidate_bundle<'e, T>(
     matches: &[T],
     highlight_limit: usize,
     return_all_scores: bool,
-    regexp_only: Option<&[Value<'e>]>,
+    regexp_only: Option<&[RegexpOnlyCandidate<'e>]>,
 ) -> Result<Value<'e>>
 where
     T: ScoredCandidateEntry<'e>,
@@ -517,8 +576,8 @@ where
     }
     if let Some(regexp_only) = regexp_only {
         let mut extras = env.intern("nil")?;
-        for (index, &value) in regexp_only.iter().rev().enumerate() {
-            extras = env.cons(value, extras)?;
+        for (index, candidate) in regexp_only.iter().rev().enumerate() {
+            extras = env.cons(candidate.value, extras)?;
             if interrupt_after_processed(env, index + 1)? {
                 return interrupted_bundle(env);
             }
@@ -569,7 +628,7 @@ fn candidates_impl<'e>(
             &pattern,
             candidates,
             sort_options,
-            history_ranks.as_deref(),
+            history_ranks.as_deref().map(HistoryRanks::ByIndex).as_ref(),
             regexp_groups,
         )? {
             Some(matches) => matches,
@@ -619,6 +678,230 @@ fn candidates_impl<'e>(
             highlight_limit,
             return_all_scores,
             regexp_groups.map(|_| regexp_only.as_slice()),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RegexpPriority {
+    Before,
+    After,
+    NonAscii,
+}
+
+impl RegexpPriority {
+    fn promotes(self, non_ascii: bool) -> bool {
+        match self {
+            Self::Before => true,
+            Self::After => false,
+            Self::NonAscii => non_ascii,
+        }
+    }
+}
+
+// Construct each result directly in reverse order, keeping the fuzzy highlight
+// limit independent of the number of promoted regexp matches.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Bundle assembly keeps options explicit"
+)]
+fn build_merged_bundle<'e, T: ScoredCandidateEntry<'e>>(
+    env: &'e Env,
+    pattern: &Pattern,
+    matches: &[T],
+    extras: &[RegexpOnlyCandidate<'e>],
+    priority: RegexpPriority,
+    highlight_limit: usize,
+    return_all_scores: bool,
+    include_top_info: bool,
+) -> Result<Value<'e>> {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for (index, candidate) in extras.iter().enumerate() {
+        if priority.promotes(candidate.non_ascii) {
+            before.push(candidate.value);
+        } else {
+            after.push(candidate.value);
+        }
+        if interrupt_after_processed(env, index + 1)? {
+            return interrupted_bundle(env);
+        }
+    }
+    let nil = env.intern("nil")?;
+    let score = matches.first().map_or(1, |candidate| candidate.score());
+    // The compatibility merge extends full scores only when fuzzy scores exist.
+    let return_all_scores = return_all_scores && !matches.is_empty();
+    let mut candidates = nil;
+    let mut scores = nil;
+    let mut count = 0;
+    let mut tail = nil;
+    if include_top_info {
+        for &value in after.iter().rev() {
+            let entry = build_list_3(env, value, score.into_lisp(env)?, nil)?;
+            tail = env.cons(entry, tail)?;
+            count += 1;
+            if interrupt_after_processed(env, count)? {
+                return interrupted_bundle(env);
+            }
+        }
+    }
+    let Some(mut top) = build_scored_top_info_onto(env, pattern, matches, highlight_limit, tail)?
+    else {
+        return interrupted_bundle(env);
+    };
+    if include_top_info {
+        for &value in before.iter().rev() {
+            let entry = build_list_3(env, value, score.into_lisp(env)?, nil)?;
+            top = env.cons(entry, top)?;
+            count += 1;
+            if interrupt_after_processed(env, count)? {
+                return interrupted_bundle(env);
+            }
+        }
+    }
+    for &value in after.iter().rev() {
+        candidates = env.cons(value, candidates)?;
+        if return_all_scores {
+            scores = env.cons(score.into_lisp(env)?, scores)?;
+        }
+        count += 1;
+        if interrupt_after_processed(env, count)? {
+            return interrupted_bundle(env);
+        }
+    }
+    for candidate in matches.iter().rev() {
+        candidates = env.cons(candidate.value(), candidates)?;
+        if return_all_scores {
+            scores = env.cons(candidate.score().into_lisp(env)?, scores)?;
+        }
+        count += 1;
+        if interrupt_after_processed(env, count)? {
+            return interrupted_bundle(env);
+        }
+    }
+    for &value in before.iter().rev() {
+        candidates = env.cons(value, candidates)?;
+        if return_all_scores {
+            scores = env.cons(score.into_lisp(env)?, scores)?;
+        }
+        count += 1;
+        if interrupt_after_processed(env, count)? {
+            return interrupted_bundle(env);
+        }
+    }
+    if input_pending(env)? {
+        return interrupted_bundle(env);
+    }
+    let fuzzy_span = env.cons(before.len().into_lisp(env)?, matches.len().into_lisp(env)?)?;
+    let tail = env.cons(fuzzy_span, nil)?;
+    env.cons(candidates, env.cons(top, env.cons(scores, tail)?)?)
+}
+
+/// Return merged candidates, top information, scores, and a fuzzy match span.
+/// The fourth slot is (BEFORE-COUNT . FUZZY-COUNT), identifying the fuzzy
+/// candidates within the merged result.
+/// HISTORY-ENTRIES is an alist of normalized candidate strings and integer ranks.
+/// Non-nil REGEXP-GROUPS adds regexp-only matches according to REGEXP-PRIORITY;
+/// INCLUDE-REGEXP-TOP-INFO adds synthetic top entries without reducing the
+/// number of highlighted fuzzy matches.  Unsupported regexp semantics return
+/// `nucleo-completion-unsupported-regexp' for the Lisp fallback.
+#[allow(clippy::too_many_arguments, reason = "Emacs module API is positional")]
+#[defun]
+fn candidates_with_options<'e>(
+    env: &'e Env,
+    pattern: String,
+    candidates: Value<'e>,
+    ignore_case: Value<'e>,
+    sort_ties_by_length: Value<'e>,
+    sort_ties_alphabetically: Value<'e>,
+    history_entries: Value<'e>,
+    highlight_limit: Value<'e>,
+    return_all_scores: Value<'e>,
+    regexp_groups: Value<'e>,
+    regexp_priority: Value<'e>,
+    include_regexp_top_info: Value<'e>,
+) -> Result<Value<'e>> {
+    if input_pending(env)? {
+        return interrupted_bundle(env);
+    }
+    let groups = if regexp_groups.is_not_nil() {
+        if ignore_case.is_not_nil() {
+            return env.intern("nucleo-completion-unsupported-regexp");
+        }
+        let Some(groups) = RegexpGroups::from_lisp(regexp_groups)? else {
+            return env.intern("nucleo-completion-unsupported-regexp");
+        };
+        Some(groups)
+    } else {
+        None
+    };
+    let Some(history) = collect_history_entries(env, history_entries)? else {
+        return interrupted_bundle(env);
+    };
+    let priority = if regexp_priority == env.intern("before")? {
+        RegexpPriority::Before
+    } else if regexp_priority == env.intern("after")? {
+        RegexpPriority::After
+    } else {
+        RegexpPriority::NonAscii
+    };
+    let ignore_case = ignore_case.is_not_nil();
+    let options =
+        SortOptions::from_lisp(sort_ties_by_length, sort_ties_alphabetically, ignore_case);
+    let pattern = Pattern::parse(&pattern, case_matching(ignore_case), Normalization::Smart);
+    let limit: usize = highlight_limit.into_rust()?;
+    let all_scores = return_all_scores.is_not_nil();
+    let include_top = include_regexp_top_info.is_not_nil();
+    if !history.is_empty() || options.ties_by_length || options.ties_alphabetically {
+        let resolver = HistoryRanks::ByText(&history);
+        let Some(scan) = score_lisp_candidates_with_ties(
+            env,
+            &pattern,
+            candidates,
+            options,
+            Some(&resolver),
+            groups.as_ref(),
+        )?
+        else {
+            return interrupted_bundle(env);
+        };
+        if input_pending(env)? {
+            return interrupted_bundle(env);
+        }
+        let matches = sort_scored_candidates_with_ties(scan.matches);
+        if input_pending(env)? {
+            return interrupted_bundle(env);
+        }
+        build_merged_bundle(
+            env,
+            &pattern,
+            &matches,
+            &scan.regexp_only,
+            priority,
+            limit,
+            all_scores,
+            include_top,
+        )
+    } else {
+        let Some(scan) = score_lisp_candidates(env, &pattern, candidates, groups.as_ref())? else {
+            return interrupted_bundle(env);
+        };
+        if input_pending(env)? {
+            return interrupted_bundle(env);
+        }
+        let matches = sort_scored_candidates(scan.matches);
+        if input_pending(env)? {
+            return interrupted_bundle(env);
+        }
+        build_merged_bundle(
+            env,
+            &pattern,
+            &matches,
+            &scan.regexp_only,
+            priority,
+            limit,
+            all_scores,
+            include_top,
         )
     }
 }
@@ -768,6 +1051,47 @@ mod tests {
     fn sorted_indices(mut items: Vec<CandidateSortData>) -> Vec<usize> {
         items.sort_unstable_by(compare_candidate_sort_data);
         items.into_iter().map(|item| item.index).collect()
+    }
+
+    #[test]
+    fn history_lookup_uses_exact_candidate_text_or_legacy_index() {
+        let ranks = HashMap::from([("Alpha".to_owned(), 2), ("beta".to_owned(), 0)]);
+        let by_text = HistoryRanks::ByText(&ranks);
+        assert_eq!(by_text.lookup(99, "Alpha"), Some(2));
+        assert_eq!(by_text.lookup(0, "alpha"), None);
+        let legacy = [None, Some(3)];
+        let by_index = HistoryRanks::ByIndex(&legacy);
+        assert_eq!(by_index.lookup(1, "anything"), Some(3));
+        assert_eq!(by_index.lookup(2, "anything"), None);
+    }
+
+    #[test]
+    fn regexp_priority_partitions_in_source_order() {
+        let values = ["ascii", "日本語", "ascii", "é"];
+        for (priority, expected_before, expected_after) in [
+            (
+                RegexpPriority::Before,
+                vec!["ascii", "日本語", "ascii", "é"],
+                vec![],
+            ),
+            (
+                RegexpPriority::After,
+                vec![],
+                vec!["ascii", "日本語", "ascii", "é"],
+            ),
+            (
+                RegexpPriority::NonAscii,
+                vec!["日本語", "é"],
+                vec!["ascii", "ascii"],
+            ),
+        ] {
+            let (before, after): (Vec<_>, Vec<_>) = values
+                .iter()
+                .copied()
+                .partition(|s| priority.promotes(!s.is_ascii()));
+            assert_eq!(before, expected_before);
+            assert_eq!(after, expected_after);
+        }
     }
 
     #[test]

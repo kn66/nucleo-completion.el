@@ -218,10 +218,17 @@ The module returns scores and match indices together, so highlighted characters
 track the same match that produced the score without one module call per
 candidate.
 
+With the native options API, Lisp normalizes only the history entries and
+passes their ranks to Rust.  History lookup happens during fuzzy scoring,
+avoiding a separate Lisp scan and a candidate-sized rank list.  Older modules
+and candidates requiring non-Unicode scrubbing retain the compatibility path.
+
 For case-sensitive built-in language search over at least 4,096 candidates,
 the module also tests language regexps during that same candidate scan.  Only
-fuzzy misses need the extra regexp tests.  Lisp retains the existing merging,
-priority and highlighting rules, without another full candidate scan.
+fuzzy misses need the extra regexp tests.  The native options API also records
+whether those candidates contain non-ASCII text during scanning and constructs
+the merged result in Rust, preserving the existing priority and highlighting
+rules.  Older modules still merge the native scan's results in Lisp.
 
 Smaller lists, custom regexp functions, case-insensitive searches, unsupported
 regexp syntax, and candidates that need non-Unicode scrubbing use the existing
@@ -244,6 +251,13 @@ Compare the existing scan and automatic native selection locally with:
 The benchmark uses mixed ASCII/Japanese/Chinese synthetic candidates and warms
 the language dictionaries before timing.  Timings depend on candidate content,
 query and hardware; ~bench/README.org~ records the local comparison.
+
+To compare native history lookup and result merging against the previous batch
+API in the same release binary, run:
+
+#+begin_src sh
+  emacs -Q --batch -L . -l bench/native-postprocessing.el
+#+end_src
 
 For an external benchmark comparison, see
 [[https://github.com/kn66/emacs-completion-bench][emacs-completion-bench]].
@@ -533,5 +547,12 @@ After rebuilding the module, restart graphical Emacs and check:
   completion session.  Check that previously filtered results are not reused.
 - With score bands enabled, check that language-only matches use the high-score
   face and respect ~nucleo-completion-regexp-only-match-priority~.
+- Enable history tie sorting in a minibuffer and in a Corfu buffer with
+  ~corfu-history-mode~.  Check that recent equal-score candidates come first,
+  including after changing the minibuffer default or completion prefix.
+- Combine history sorting and language search with at least 4,096 candidates.
+  Cycle through ~before~, ~after~, and ~non-ascii~ language-only priorities,
+  with score bands and lazy highlighting both enabled and disabled.  Check
+  that duplicate display strings retain their own selection and annotations.
 - Disable both languages and custom expanders buffer-locally in a Corfu buffer;
   verify that minibuffer language search continues to work.

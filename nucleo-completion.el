@@ -42,6 +42,12 @@
                   (pattern candidates ignore-case sort-ties-by-length
                            sort-ties-alphabetically history-ranks
                            highlight-limit return-all-scores regexp-groups))
+(declare-function nucleo-completion-candidates-with-options
+                  "ext:nucleo-completion-module"
+                  (pattern candidates ignore-case sort-ties-by-length
+                           sort-ties-alphabetically history-entries
+                           highlight-limit return-all-scores regexp-groups
+                           regexp-priority include-regexp-top-info))
 (declare-function nucleo-completion-module-version
                   "ext:nucleo-completion-module")
 (declare-function nucleo-completion-migemo-regexp
@@ -2090,7 +2096,131 @@ TABLE maps candidate strings to their history ranks."
           (when any
             (cons (nreverse ranks) table)))))))
 
+(defun nucleo-completion--native-score-properties (bundle)
+  "Attach requested scores to the native candidates in BUNDLE.
+The fourth slot is (BEFORE-COUNT . FUZZY-COUNT), locating fuzzy
+matches inside the merged result.  Fuzzy matches always carry
+requested scores; regexp-only matches carry them only when score
+bands are enabled, matching the compatibility path.  Native result
+list cells are fresh, so replacing their strings preserves the
+original completion table and candidate text properties."
+  (let* ((range (nth 3 bundle))
+         (start (car range))
+         (end (+ start (cdr range)))
+         (index 0)
+         (cell (nucleo-completion--bundle-candidates bundle))
+         (scores (nucleo-completion--bundle-full-scores bundle)))
+    (while (and cell scores)
+      (let* ((candidate (car cell))
+             (score (car scores))
+             (fuzzy-p (and (>= index start) (< index end))))
+        (when (if fuzzy-p
+                  (not (equal (nucleo-completion--candidate-score candidate)
+                              score))
+                nucleo-completion-highlight-score-bands)
+          (setcar cell (nucleo-completion--propertize-score candidate score))))
+      (setq cell (cdr cell)
+            scores (cdr scores)
+            index (1+ index)))))
+
+(defun nucleo-completion--native-completion-results
+    (prefix needle all expanded-regexp-p highlight-limit need-full-scores)
+  "Return native completion data, or request the compatibility path.
+PREFIX, NEEDLE, ALL, EXPANDED-REGEXP-P, HIGHLIGHT-LIMIT and
+NEED-FULL-SCORES describe the completion request.  History keys
+are normalized by Emacs, but candidate lookup and regexp-only
+merging happen during the native scan.  Return
+`nucleo-completion-unsupported-regexp' when the older path is needed,
+including when scrubbing could change history identity."
+  (catch 'nucleo-completion-native-unavailable
+    (unless (and (nucleo-completion--module-ready-p)
+                 (fboundp 'nucleo-completion-candidates-with-options)
+                 (not nucleo-completion-scrub-non-unicode-candidates)
+                 (not nucleo-completion--force-scrub-non-unicode-candidates))
+      (throw 'nucleo-completion-native-unavailable
+             'nucleo-completion-unsupported-regexp))
+    (let* ((rank-table (and (cdr all)
+                            (nucleo-completion--history-rank-table prefix)))
+           (fast-p (and expanded-regexp-p nucleo-completion-languages
+                        (null nucleo-completion-regexp-functions)
+                        (not completion-ignore-case)
+                        (nthcdr
+                         (1- nucleo-completion--native-regexp-minimum-candidates)
+                         all)))
+           (include-extra-info (and (> highlight-limit 0)
+                                    nucleo-completion-highlight-score-bands
+                                    (not need-full-scores)))
+           history-entries bundle)
+      (unless (or rank-table fast-p)
+        (throw 'nucleo-completion-native-unavailable
+               'nucleo-completion-unsupported-regexp))
+      (when rank-table
+        (maphash
+         (lambda (candidate rank)
+           ;; A history key may contain Consult disambiguation characters
+           ;; even when every candidate is valid Unicode.  Keep those keys
+           ;; on the compatibility path instead of scrubbing their identity.
+           (unless (nucleo-completion--unicode-string-p candidate)
+             (throw 'nucleo-completion-native-unavailable
+                    'nucleo-completion-unsupported-regexp))
+           (push (cons candidate rank) history-entries))
+         rank-table))
+      (condition-case err
+          (progn
+            (setq bundle
+                  (nucleo-completion-candidates-with-options
+                   needle all completion-ignore-case
+                   nucleo-completion-sort-ties-by-length
+                   nucleo-completion-sort-ties-alphabetically history-entries
+                   highlight-limit need-full-scores
+                   (and fast-p
+                        (nucleo-completion--regexp-only-regexp-groups needle))
+                   nucleo-completion-regexp-only-match-priority
+                   include-extra-info))
+            (when (eq bundle 'nucleo-completion-unsupported-regexp)
+              (setq fast-p nil
+                    bundle
+                    (nucleo-completion-candidates-with-options
+                     needle all completion-ignore-case
+                     nucleo-completion-sort-ties-by-length
+                     nucleo-completion-sort-ties-alphabetically history-entries
+                     highlight-limit need-full-scores nil
+                     nucleo-completion-regexp-only-match-priority nil)))
+            (when (nucleo-completion--bundle-interrupted-p bundle)
+              (throw 'nucleo-completion-interrupted
+                     nucleo-completion--interrupted-sentinel))
+            (when need-full-scores
+              (nucleo-completion--native-score-properties bundle))
+            (setq bundle (list (nth 0 bundle) (nth 1 bundle) (nth 2 bundle)))
+            (when (and expanded-regexp-p (not fast-p))
+              (setq bundle
+                    (nucleo-completion--merge-regexp-only-matches
+                     needle all bundle include-extra-info)))
+            (list (nucleo-completion--bundle-candidates bundle) bundle
+                  (nucleo-completion--bundle-top-info bundle)
+                  (nucleo-completion--bundle-full-scores bundle)))
+        (wrong-type-argument
+         (if (nucleo-completion--module-unicode-error-p err)
+             ;; The legacy wrapper retries with scrubbing and ranks original
+             ;; candidates, so distinct disambiguated strings stay distinct.
+             'nucleo-completion-unsupported-regexp
+           (signal (car err) (cdr err))))))))
+
 (defun nucleo-completion--module-completion-results
+    (prefix needle all expanded-regexp-p highlight-limit need-full-scores)
+  "Return module completion data for NEEDLE and ALL under PREFIX.
+EXPANDED-REGEXP-P, HIGHLIGHT-LIMIT and NEED-FULL-SCORES select
+language matching and display data.  Prefer native history lookup
+and merging when supported; retain the older API for compatibility."
+  (let ((result (nucleo-completion--native-completion-results
+                 prefix needle all expanded-regexp-p
+                 highlight-limit need-full-scores)))
+    (if (eq result 'nucleo-completion-unsupported-regexp)
+        (nucleo-completion--legacy-module-completion-results
+         prefix needle all expanded-regexp-p highlight-limit need-full-scores)
+      result)))
+
+(defun nucleo-completion--legacy-module-completion-results
     (prefix needle all expanded-regexp-p highlight-limit need-full-scores)
   "Return module-backed filtering result for NEEDLE and ALL.
 PREFIX is used to interpret minibuffer history entries.  When
