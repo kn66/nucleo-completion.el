@@ -256,6 +256,12 @@ The stub returns TRIPLES wrapped as a module-result bundle."
             (make-directory dir t)
             (with-temp-file (expand-file-name library dir)
               (insert "module")))
+          (let* ((digest (secure-hash 'sha256 "module"))
+                 (selected (concat "libnucleo_completion_module-" digest ".so")))
+            (rename-file (expand-file-name library old-dir)
+                         (expand-file-name selected old-dir))
+            (with-temp-file (expand-file-name "current" old-dir)
+              (insert digest "\n")))
           (let ((dirs (nucleo-completion--stale-installed-module-directories)))
             (should (member old-dir dirs))
             (should (member latest-dir dirs))
@@ -290,6 +296,7 @@ The stub returns TRIPLES wrapped as a module-result bundle."
          (system-configuration "x86_64-pc-linux-gnu")
          (payload "module contents")
          loaded
+         (original-featurep (symbol-function 'featurep))
          downloads)
     (unwind-protect
         (cl-letf (((symbol-function 'nucleo-completion--download-file)
@@ -307,12 +314,17 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                      (setq loaded t)))
                   ((symbol-function 'nucleo-completion--module-ready-p)
                    (lambda () loaded))
+                  ((symbol-function 'featurep)
+                   (lambda (feature &optional subfeature)
+                     (and (not (eq feature 'nucleo-completion-module))
+                          (funcall original-featurep feature subfeature))))
                   ((symbol-function 'yes-or-no-p)
                    (lambda (_prompt)
                      (error "Install test should not prompt"))))
           (let ((destination (nucleo-completion-install-module nil t)))
             (should (equal (file-name-nondirectory destination)
-                           "libnucleo_completion_module.so"))
+                           (concat "libnucleo_completion_module-"
+                                   (secure-hash 'sha256 payload) ".so")))
             (should (equal (with-temp-buffer
                              (insert-file-contents destination)
                              (buffer-string))
@@ -332,14 +344,17 @@ The stub returns TRIPLES wrapped as a module-result bundle."
           (expand-file-name
            "v9.8.7/x86_64-unknown-linux-gnu"
            nucleo-completion-module-directory))
-         (destination
+         (old-destination
           (expand-file-name "libnucleo_completion_module.so" directory))
+         (destination
+          (expand-file-name (concat "libnucleo_completion_module-"
+                                    (secure-hash 'sha256 payload) ".so") directory))
          downloads
          messages)
     (unwind-protect
         (progn
           (make-directory directory t)
-          (with-temp-file destination
+          (with-temp-file old-destination
             (insert "old module contents"))
           (cl-letf (((symbol-function 'nucleo-completion--download-file)
                      (lambda (url file)
@@ -365,11 +380,161 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                              (insert-file-contents destination)
                              (buffer-string))
                            payload))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents old-destination)
+                             (buffer-string))
+                           "old module contents"))
             (should (= (length downloads) 2))
             (should (string-match-p
                      "restart Emacs"
                      (car messages)))))
       (delete-directory root t))))
+
+(defmacro nucleo-completion-tests--with-module-install (&rest body)
+  "Run BODY with downloads and module loading isolated in a temporary directory."
+  (declare (indent 0))
+  `(let* ((root (make-temp-file "nucleo-completion-install-test-" t))
+          (nucleo-completion-module-directory (expand-file-name "modules" root))
+          (nucleo-completion-required-module-version "9.8.7")
+          (system-type 'gnu/linux)
+          (system-configuration "x86_64-pc-linux-gnu")
+          (directory (expand-file-name "v9.8.7/x86_64-unknown-linux-gnu"
+                                       nucleo-completion-module-directory))
+          (library "libnucleo_completion_module.so")
+          (payload "first module")
+          module-download)
+     (unwind-protect
+         (cl-letf (((symbol-function 'nucleo-completion--dynamic-modules-supported-p)
+                    (lambda () t))
+                   ((symbol-function 'nucleo-completion--module-ready-p) (lambda () t))
+                   ((symbol-function 'nucleo-completion--download-file)
+                    (lambda (url file)
+                      (unless (string-suffix-p ".sha256" url)
+                        (setq module-download file))
+                      (with-temp-file file
+                        (insert (if (string-suffix-p ".sha256" url)
+                                    (concat (secure-hash 'sha256 payload) "  asset\n")
+                                  payload))))))
+           ,@body)
+       (delete-directory root t))))
+
+(ert-deftest nucleo-completion-install-module-reuses-immutable-digest-test ()
+  (nucleo-completion-tests--with-module-install
+    (let* ((first (nucleo-completion-install-module t t))
+           (original-rename (symbol-function 'rename-file)))
+      (should (equal (file-name-directory module-download)
+                     (file-name-as-directory directory)))
+      (cl-letf (((symbol-function 'rename-file)
+                 (lambda (from to &optional overwrite)
+                   (when (equal to first)
+                     (error "Cannot overwrite a loaded module"))
+                   (funcall original-rename from to overwrite))))
+        (should (equal (nucleo-completion-install-module t t) first)))
+      (should (equal (with-temp-buffer (insert-file-contents first) (buffer-string))
+                     payload)))))
+
+(ert-deftest nucleo-completion-install-module-retains-old-digest-test ()
+  (nucleo-completion-tests--with-module-install
+    (let ((first (nucleo-completion-install-module t t)))
+      (setq payload "second module")
+      (let ((second (nucleo-completion-install-module t t)))
+        (should-not (equal first second))
+        (should (equal (with-temp-buffer (insert-file-contents first) (buffer-string))
+                       "first module"))
+        (should (equal (with-temp-buffer (insert-file-contents second) (buffer-string))
+                       payload))
+        (should (equal (nucleo-completion--module-file-in-directory directory library)
+                       second))))))
+
+(ert-deftest nucleo-completion-install-module-rejects-corrupt-digest-file-test ()
+  (nucleo-completion-tests--with-module-install
+    (let ((first (nucleo-completion-install-module t t)))
+      (setq payload "second module")
+      (let ((conflict (expand-file-name
+                       (concat "libnucleo_completion_module-"
+                               (secure-hash 'sha256 payload) ".so") directory)))
+        (with-temp-file conflict (insert "not the expected module"))
+        (should-error (nucleo-completion-install-module t t))
+        (should (equal (with-temp-buffer (insert-file-contents conflict)
+                                         (buffer-string))
+                       "not the expected module"))
+        (should (equal (nucleo-completion--module-file-in-directory directory library)
+                       first))))))
+
+(ert-deftest nucleo-completion-install-module-selector-failure-preserves-selection-test ()
+  (nucleo-completion-tests--with-module-install
+    (let ((first (nucleo-completion-install-module t t))
+          (original-rename (symbol-function 'rename-file)))
+      (setq payload "second module")
+      (cl-letf (((symbol-function 'rename-file)
+                 (lambda (from to &optional overwrite)
+                   (if (equal to (expand-file-name "current" directory))
+                       (error "Simulated selector update failure")
+                     (funcall original-rename from to overwrite)))))
+        (should-error (nucleo-completion-install-module t t)))
+      (should (equal (nucleo-completion--module-file-in-directory directory library)
+                     first))
+      (should-not (file-exists-p module-download))
+      (should (equal (sort (cl-remove-if (lambda (file) (member file '("." "..")))
+                                    (directory-files directory nil nil t))
+                           #'string<)
+                     (sort (list "current" (file-name-nondirectory first)
+                                 (concat "libnucleo_completion_module-"
+                                         (secure-hash 'sha256 payload) ".so"))
+                           #'string<))))))
+
+(ert-deftest nucleo-completion-install-module-incompatible-loaded-module-test ()
+  (nucleo-completion-tests--with-module-install
+    (let ((original-featurep (symbol-function 'featurep)) messages)
+      (cl-letf (((symbol-function 'nucleo-completion--module-ready-p) (lambda () nil))
+                ((symbol-function 'featurep)
+                 (lambda (feature &optional subfeature)
+                   (or (eq feature 'nucleo-completion-module)
+                       (funcall original-featurep feature subfeature))))
+                ((symbol-function 'nucleo-completion--load-module)
+                 (lambda () (error "A loaded incompatible module cannot be reloaded")))
+                ((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (push (apply #'format format-string args) messages))))
+        (should (file-exists-p (nucleo-completion-install-module t t)))
+        (should (string-match-p "restart Emacs" (car messages)))))))
+
+(ert-deftest nucleo-completion-install-module-bad-checksum-preserves-selection-test ()
+  (nucleo-completion-tests--with-module-install
+    (let ((first (nucleo-completion-install-module t t)))
+      (cl-letf (((symbol-function 'nucleo-completion--download-file)
+                 (lambda (url file)
+                   (unless (string-suffix-p ".sha256" url)
+                     (setq module-download file))
+                   (with-temp-file file
+                     (insert (if (string-suffix-p ".sha256" url)
+                                 (concat (make-string 64 ?0) "  asset\n")
+                               "corrupt download"))))))
+        (should-error (nucleo-completion-install-module t t)))
+      (should-not (file-exists-p module-download))
+      (should (equal (nucleo-completion--module-file-in-directory directory library)
+                     first))
+      (should (equal (sort (cl-remove-if (lambda (file) (member file '("." "..")))
+                                        (directory-files directory nil nil t))
+                           #'string<)
+                     (sort (list "current" (file-name-nondirectory first))
+                           #'string<))))))
+
+(ert-deftest nucleo-completion-module-selector-falls-back-to-legacy-test ()
+  (let* ((directory (make-temp-file "nucleo-selector-test-" t))
+         (library "libnucleo_completion_module.so")
+         (legacy (expand-file-name library directory))
+         (selector (expand-file-name "current" directory)))
+    (unwind-protect
+        (progn
+          (with-temp-file legacy (insert "legacy"))
+          (dolist (contents (list nil "bad\n" (concat (make-string 64 ?a) "\n")
+                                  (concat (make-string 64 ?A) "\n")))
+            (if contents (with-temp-file selector (insert contents))
+              (when (file-exists-p selector) (delete-file selector)))
+            (should (equal (nucleo-completion--module-file-in-directory directory library)
+                           legacy))))
+      (delete-directory directory t))))
 
 (ert-deftest nucleo-completion-ensure-module-skips-ready-module-test ()
   (let (load-called install-called)

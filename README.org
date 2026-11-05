@@ -91,6 +91,15 @@ to load it.  No download happens during package installation or ordinary
 package load.  If a module was already loaded in the current Emacs process,
 restart Emacs to use the newly installed file.
 
+Reinstalling the same release stores changed binaries under SHA256-qualified
+filenames and switches a small ~current~ selector after checksum verification.
+Identical binaries reuse the existing file.  The installer never replaces a
+loaded DLL, which avoids Windows ~Renaming: Permission denied~ errors during
+same-version updates.  Old binaries remain on disk because another Emacs
+process may still use them.  Existing installations with the original fixed
+filename remain loadable.  Updating an installed file still requires an Emacs
+restart; dynamic modules cannot be unloaded in the current process.
+
 To opt in to automatic install from your configuration, call:
 
 #+begin_src emacs-lisp
@@ -115,7 +124,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.16")
+  (setq nucleo-completion-module-release-tag "v0.1.17")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -177,7 +186,7 @@ automatically after every push to ~main~.  It builds modules named
 
 After validation and all four platform-specific load checks succeed, the
 workflow automatically publishes a GitHub Release named after the Cargo package
-version, for example ~v0.1.16~.  The release includes the four modules, their
+version, for example ~v0.1.17~.  The release includes the four modules, their
 checksums, and license notices.  The module installer downloads these published
 Release assets, so no manual release step is needed for a new package version.
 

@@ -4,7 +4,7 @@
 
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
-;; Version: 0.1.16
+;; Version: 0.1.17
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
@@ -239,7 +239,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defconst nucleo-completion-required-module-version "0.1.16"
+(defconst nucleo-completion-required-module-version "0.1.17"
   "Version of the prebuilt Rust module expected by this package.")
 
 (defcustom nucleo-completion-module-release-tag nil
@@ -489,7 +489,8 @@ completed BODY values lets callers distinguish those cases."
         (cl-loop for release-dir in
                  (directory-files nucleo-completion-module-directory t "\\`[^.]")
                  for module-dir = (expand-file-name triple release-dir)
-                 for module-file = (expand-file-name library module-dir)
+                 for module-file =
+                 (nucleo-completion--module-file-in-directory module-dir library)
                  when (and (file-readable-p module-file)
                            (not (string= (expand-file-name module-dir)
                                          (expand-file-name current))))
@@ -507,10 +508,39 @@ completed BODY values lets callers distinguish those cases."
         (expand-file-name "target/release" nucleo-completion--directory)
         (expand-file-name "target/debug" nucleo-completion--directory)))
 
+(defun nucleo-completion--module-file-for-digest (directory library digest)
+  "Return the immutable module path in DIRECTORY for LIBRARY and DIGEST."
+  (expand-file-name
+   (concat (file-name-sans-extension library) "-" digest
+           "." (file-name-extension library))
+   directory))
+
+(defun nucleo-completion--module-file-in-directory (directory library)
+  "Return the selected module in DIRECTORY, or the legacy LIBRARY path.
+The current file contains only a SHA256 digest.  Keeping the selector
+separate lets Windows installations switch binaries without renaming
+or deleting a DLL that another Emacs process still has loaded.  Missing,
+incomplete or invalid selectors fall back to the older fixed filename."
+  (let* ((selector (expand-file-name "current" directory))
+         (digest (when (file-readable-p selector)
+                   (condition-case nil
+                       (with-temp-buffer
+                         (insert-file-contents selector nil 0 66)
+                         (let ((text (string-trim (buffer-string))))
+                           (when (string-match-p "\\`[0-9a-f]\\{64\\}\\'" text)
+                             text)))
+                     (file-error nil))))
+         (selected (and digest
+                        (nucleo-completion--module-file-for-digest
+                         directory library digest))))
+    (if (and selected (file-readable-p selected))
+        selected
+      (expand-file-name library directory))))
+
 (defun nucleo-completion--module-files-in-directories (library directories)
   "Return candidate module files named LIBRARY in DIRECTORIES."
   (mapcar (lambda (directory)
-            (expand-file-name library directory))
+            (nucleo-completion--module-file-in-directory directory library))
           directories))
 
 (defun nucleo-completion--installed-module-release-name (file)
@@ -583,9 +613,9 @@ call path without a built binary."
   "Return the current configured installed module file, or nil."
   (let ((triple (nucleo-completion--module-install-triple)))
     (when triple
-      (expand-file-name
-       (nucleo-completion--rust-library-name)
-       (nucleo-completion--module-install-directory triple)))))
+      (nucleo-completion--module-file-in-directory
+       (nucleo-completion--module-install-directory triple)
+       (nucleo-completion--rust-library-name)))))
 
 (defun nucleo-completion--maybe-warn-stale-loaded-module ()
   "Warn once when an older installed dynamic module was loaded."
@@ -749,12 +779,46 @@ When CHECKSUM is non-nil, return the SHA256 checksum asset URL."
     (secure-hash 'sha256 (current-buffer))))
 
 (defun nucleo-completion--verify-sha256 (file checksum-file)
-  "Signal unless FILE matches the SHA256 digest in CHECKSUM-FILE."
+  "Return FILE's digest, signaling if it differs from CHECKSUM-FILE."
   (let ((expected (nucleo-completion--sha256-from-file checksum-file))
         (actual (nucleo-completion--file-sha256 file)))
     (unless (string= expected actual)
       (error "SHA256 mismatch for %s: expected %s, got %s"
-             file expected actual))))
+             file expected actual))
+    actual))
+
+(defun nucleo-completion--activate-installed-module
+    (module-temp directory library digest)
+  "Select verified MODULE-TEMP in DIRECTORY for LIBRARY and DIGEST.
+Store binaries under immutable digest-qualified names, preserving loaded
+DLLs and allowing identical downloads to reuse an existing file.  Commit
+the small current selector only after the binary is ready.  Both renames
+stay inside DIRECTORY so they cannot fall back to cross-filesystem copies.
+Old binaries remain because another Emacs process may still use them."
+  (let ((destination (nucleo-completion--module-file-for-digest
+                      directory library digest))
+        (selector-temp (make-temp-file
+                        (expand-file-name ".nucleo-current-" directory))))
+    (unwind-protect
+        (progn
+          (if (file-exists-p destination)
+              (unless (string= digest
+                               (nucleo-completion--file-sha256 destination))
+                (error "Installed module checksum mismatch: %s" destination))
+            ;; Never replace an existing binary, including one held open by
+            ;; Windows.  A concurrent installer may have published it first.
+            (condition-case err
+                (rename-file module-temp destination nil)
+              (file-already-exists
+               (unless (string= digest
+                                (nucleo-completion--file-sha256 destination))
+                 (signal (car err) (cdr err))))))
+          (with-temp-file selector-temp
+            (insert digest "\n"))
+          (rename-file selector-temp (expand-file-name "current" directory) t)
+          destination)
+      (when (file-exists-p selector-temp)
+        (delete-file selector-temp)))))
 
 (defun nucleo-completion--terms (pattern)
   "Split PATTERN into non-empty whitespace-separated terms."
@@ -1019,18 +1083,21 @@ Honor IGNORE-CASE.  The result is an alist of (CANDIDATE . SCORE)."
 The module is downloaded from GitHub Releases only after
 confirmation, unless NO-CONFIRM is non-nil.  The default release
 matches `nucleo-completion-required-module-version'.  With prefix
-argument FORCE, replace an existing installed module."
+argument FORCE, reinstall an existing module.  Different contents are
+stored in a new file so a loaded Windows DLL is never overwritten."
   (interactive "P")
   (unless (nucleo-completion--dynamic-modules-supported-p)
     (user-error "This Emacs was built without dynamic module support"))
-  (let* ((module-loaded (nucleo-completion--module-ready-p))
+  (let* ((module-loaded (or (featurep 'nucleo-completion-module)
+                            (nucleo-completion--module-ready-p)))
          (triple (or (nucleo-completion--module-install-triple)
                      (user-error
                       "No prebuilt module is published for %s"
                       system-configuration)))
          (library (nucleo-completion--rust-library-name))
          (directory (nucleo-completion--module-install-directory triple))
-         (destination (expand-file-name library directory))
+         (destination (nucleo-completion--module-file-in-directory
+                       directory library))
          (asset-url (nucleo-completion--module-asset-url triple))
          (checksum-url (nucleo-completion--module-asset-url triple t)))
     (when (and (file-exists-p destination)
@@ -1050,15 +1117,22 @@ argument FORCE, replace an existing installed module."
                 "Download nucleo-completion module for %s from %s to %s? "
                 triple asset-url destination))
         (user-error "Module installation cancelled")))
-    (let ((module-temp (make-temp-file "nucleo-completion-module-"))
-          (checksum-temp (make-temp-file "nucleo-completion-module-sha256-")))
+    (make-directory directory t)
+    (let (module-temp checksum-temp)
       (unwind-protect
           (progn
+            (setq module-temp
+                  (make-temp-file
+                   (expand-file-name ".nucleo-module-" directory))
+                  checksum-temp
+                  (make-temp-file "nucleo-completion-module-sha256-"))
             (nucleo-completion--download-file checksum-url checksum-temp)
             (nucleo-completion--download-file asset-url module-temp)
-            (nucleo-completion--verify-sha256 module-temp checksum-temp)
-            (make-directory directory t)
-            (rename-file module-temp destination t)
+            (let ((digest (nucleo-completion--verify-sha256
+                           module-temp checksum-temp)))
+              (setq destination
+                    (nucleo-completion--activate-installed-module
+                     module-temp directory library digest)))
             (if module-loaded
                 (message
                  "nucleo-completion: installed %s; restart Emacs to use it"
@@ -1074,9 +1148,9 @@ argument FORCE, replace an existing installed module."
                   destination)
                  :warning)))
             destination)
-        (when (file-exists-p module-temp)
+        (when (and module-temp (file-exists-p module-temp))
           (delete-file module-temp))
-        (when (file-exists-p checksum-temp)
+        (when (and checksum-temp (file-exists-p checksum-temp))
           (delete-file checksum-temp))))))
 
 ;;;###autoload
