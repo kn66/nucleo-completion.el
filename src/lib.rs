@@ -956,6 +956,24 @@ fn migemo_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
     migemo::migemo_regexp(&normalize_language_query(&term)).into_lisp(env)
 }
 
+/// Return a text-only Emacs regexp for TERM in LANGUAGE, or nil when unsupported.
+/// LANGUAGE is one of `japanese', `chinese', or `korean'.  The result is a
+/// reading expansion; callers can add a quoted literal alternative as needed.
+#[defun]
+fn isearch_regexp<'e>(env: &'e Env, language: Value<'e>, term: String) -> Result<Value<'e>> {
+    let term = normalize_language_query(&term);
+    let expression = if language == env.intern("japanese")? {
+        migemo::text_regexp(&term)
+    } else if language == env.intern("chinese")? {
+        languages::pinyin_regexp(&term)
+    } else if language == env.intern("korean")? {
+        languages::hangul_regexp(&term)
+    } else {
+        None
+    };
+    expression.into_lisp(env)
+}
+
 /// Import a local UTF-8 Migemo text dictionary from PATH.
 #[defun]
 fn migemo_load_dictionary<'e>(env: &'e Env, path: String) -> Result<Value<'e>> {

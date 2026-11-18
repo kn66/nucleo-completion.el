@@ -26,6 +26,13 @@
   (unless (string-match-p (funcall (car case) (cadr case)) (caddr case))
     (error "loaded module language search failed: %S" case)))
 
+(dolist (case '((japanese "kensaku" "検索")
+                (chinese "zhongguo" "中国")
+                (korean "ㄱㅅ" "감사")))
+  (let ((regexp (nucleo-completion-isearch-regexp (nth 0 case) (nth 1 case))))
+    (unless (and regexp (string-match-p regexp (nth 2 case)))
+      (error "loaded module isearch expansion failed: %S" case))))
+
 (dolist (case '(("keiji" "軽自")
                 ("pa-to" "パートナー")
                 ("toiawase" "問い合わせ")))

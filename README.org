@@ -124,7 +124,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.19")
+  (setq nucleo-completion-module-release-tag "v0.1.20")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -186,7 +186,7 @@ automatically after every push to ~main~.  It builds modules named
 
 After validation and all four platform-specific load checks succeed, the
 workflow automatically publishes a GitHub Release named after the Cargo package
-version, for example ~v0.1.19~.  The release includes the four modules, their
+version, for example ~v0.1.20~.  The release includes the four modules, their
 checksums, and license notices.  The module installer downloads these published
 Release assets, so no manual release step is needed for a new package version.
 
@@ -494,6 +494,25 @@ bundled dictionaries separately from the optional local files.
   (setq nucleo-completion-migemo-dictionary-files
         '("/usr/share/cmigemo/utf-8/migemo-dict"))
 #+end_src
+
+*** Incremental Buffer Search
+
+Enable ~M-x nucleo-completion-isearch-mode~ to expand readings automatically
+in ordinary ~C-s~ and ~C-r~ searches.  Isearch uses the bundled data for the
+languages in ~nucleo-completion-languages~.  For example, ~kensaku~ can find ~検索~,
+~zhongguo~ can find ~中国~, and ~ㄱㅅ~ can find ~감사~.  The literal input
+can match as well.  Regexp, word, and symbol searches use their usual rules.
+
+To enable the mode at startup, add this to your Emacs configuration after
+loading the package.
+
+#+begin_src emacs-lisp
+  (nucleo-completion-isearch-mode 1)
+#+end_src
+
+Isearch expands readings for buffer text.  It uses literal matching if the
+module is missing or lacks Isearch support.  For a source checkout, run
+~cargo build --release~ and restart Emacs to load the updated module.
 
 ** Regexp Expanders
 

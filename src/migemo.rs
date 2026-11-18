@@ -299,6 +299,59 @@ impl CompoundMatcher {
     }
 }
 
+// Generate only the reading itself; filename parsing and affixes belong to the
+// completion API, while isearch must match text without filename semantics.
+pub(crate) fn text_regexp(term: &str) -> Option<String> {
+    if term.len() > MAX_TERM_CHARACTERS || !valid_reading(term) {
+        return None;
+    }
+    reading_regexp(term, false).filter(|regexp| regexp.len() <= MAX_REGEXP_BYTES)
+}
+
+fn reading_regexp(reading: &str, prune_prefixes: bool) -> Option<String> {
+    let mut generator = TernaryRegexGenerator::new();
+    let mut alternatives = Vec::new();
+    let mut prefix = String::new();
+    let mut words = BTreeSet::<String>::new();
+    expand_reading(reading, &[], |word| {
+        words.insert(word.iter().collect());
+    });
+    for word in words {
+        if prune_prefixes && !prefix.is_empty() && word.starts_with(&prefix) {
+            continue;
+        }
+        prefix.clone_from(&word);
+        if word.contains([
+            '(', ')', '{', '}', '|', '^', '$', '.', '*', '+', '?', '[', ']', '\\', '-',
+        ]) {
+            // Emacs escapes a different set of characters from the
+            // upstream generator, which also puts hyphens in classes.
+            let mut quoted = String::new();
+            for character in word.chars() {
+                if "$^.*+?[\\]".contains(character) {
+                    quoted.push('\\');
+                }
+                quoted.push(character);
+            }
+            alternatives.push(quoted);
+        } else {
+            generator.add(&word.chars().collect::<Vec<_>>());
+        }
+    }
+    let generated = generator.generate(&RegexOperator::EmacsNonNewline);
+    if !generated.is_empty() {
+        alternatives.push(generated);
+    }
+    if alternatives.is_empty() {
+        return None;
+    }
+    let expression = match alternatives.as_slice() {
+        [only] => only.clone(),
+        _ => format!("\\(?:{}\\)", alternatives.join("\\|")),
+    };
+    Some(expression)
+}
+
 pub fn migemo_regexp(term: &str) -> Option<String> {
     migemo_regexp_impl(term, true)
 }
@@ -311,49 +364,10 @@ fn migemo_regexp_impl(term: &str, include_compounds: bool) -> Option<String> {
     let mut groups = Vec::new();
     if let Some(term) = MigemoTerm::parse(term) {
         for (reading, attached) in term.readings() {
-            let mut generator = TernaryRegexGenerator::new();
-            let mut alternatives = Vec::new();
-            let mut prefix = String::new();
-            let mut words = BTreeSet::<String>::new();
-            expand_reading(reading, &[], |word| {
-                words.insert(word.iter().collect());
-            });
-            for word in words {
-                if include_compounds
-                    && attached.is_empty()
-                    && !prefix.is_empty()
-                    && word.starts_with(&prefix)
-                {
-                    continue;
-                }
-                prefix.clone_from(&word);
-                if word.contains([
-                    '(', ')', '{', '}', '|', '^', '$', '.', '*', '+', '?', '[', ']', '\\', '-',
-                ]) {
-                    // Emacs escapes a different set of characters from the
-                    // upstream generator, which also puts hyphens in classes.
-                    let mut quoted = String::new();
-                    for character in word.chars() {
-                        if "$^.*+?[\\]".contains(character) {
-                            quoted.push('\\');
-                        }
-                        quoted.push(character);
-                    }
-                    alternatives.push(quoted);
-                } else {
-                    generator.add(&word.chars().collect::<Vec<_>>());
-                }
-            }
-            let generated = generator.generate(&RegexOperator::EmacsNonNewline);
-            if !generated.is_empty() {
-                alternatives.push(generated);
-            }
-            if alternatives.is_empty() {
+            let Some(expression) =
+                reading_regexp(reading, include_compounds && attached.is_empty())
+            else {
                 continue;
-            }
-            let expression = match alternatives.as_slice() {
-                [only] => only.clone(),
-                _ => format!("\\(?:{}\\)", alternatives.join("\\|")),
             };
             // Append the shared suffix once instead of repeating it in the
             // expansion of every spelling.
@@ -639,6 +653,18 @@ impl MigemoMatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_regexp_expands_readings_without_filename_affixes() {
+        let expression = text_regexp("kensaku").unwrap();
+        assert!(expression.contains("検索"));
+        assert!(!expression.contains("[^/\\\\\n\r]*?"));
+        for unsupported in ["", "kensaku.txt", "2026-kensaku", "kensaku_test"] {
+            assert!(text_regexp(unsupported).is_none(), "{unsupported}");
+        }
+        assert!(text_regexp(&"a".repeat(MAX_TERM_CHARACTERS + 1)).is_none());
+        assert!(text_regexp("pa-to").is_some());
+    }
 
     #[test]
     fn filename_prefixes_and_multiple_readings() {

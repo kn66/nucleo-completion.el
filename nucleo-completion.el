@@ -4,7 +4,7 @@
 
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
-;; Version: 0.1.19
+;; Version: 0.1.20
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
@@ -24,6 +24,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'isearch)
 (require 'subr-x)
 
 (declare-function completion--merge-suffix "minibuffer")
@@ -52,6 +53,8 @@
                   "ext:nucleo-completion-module")
 (declare-function nucleo-completion-migemo-regexp
                   "ext:nucleo-completion-module" (term))
+(declare-function nucleo-completion-isearch-regexp
+                  "ext:nucleo-completion-module" (language term))
 (declare-function nucleo-completion-migemo-load-dictionary
                   "ext:nucleo-completion-module" (path))
 (declare-function nucleo-completion-migemo-matcher
@@ -97,11 +100,12 @@ Large values can decrease performance."
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-languages '(japanese)
-  "Languages to use for additional completion matches.
+  "Languages to use for additional completion and Isearch matches.
 Japanese uses the bundled Migemo dictionary, Chinese uses pinyin,
 and Korean uses Hangul syllables and initials.  The loaded module
 provides these matchers.  See `nucleo-completion-regexp-minimum-term-length'
-for when they are combined with `nucleo-completion-regexp-functions'."
+for the minimum length and `nucleo-completion-isearch-mode' to enable
+language expansion during Isearch."
   :type '(set (const :tag "Japanese (Migemo)" japanese)
               (const :tag "Chinese (pinyin)" chinese)
               (const :tag "Korean (initial consonants)" korean))
@@ -146,13 +150,12 @@ same function are still ignored, but are not reported again."
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-regexp-minimum-term-length 2
-  "Minimum search term length for calling regexp expanders.
-Terms shorter than this value use only the built-in fuzzy matcher,
-except that at the default of 2, the built-in Korean matcher also
-accepts a single precomposed modern Hangul syllable.  This allows
-matching its decomposed spelling without enabling broad one-character
-expansions such as Hangul initials or Migemo.  Set this to 1 to run
-all regexp expanders for single-character terms too."
+  "Minimum term length for regexp expansion in completion and Isearch.
+Shorter terms use fuzzy matching in completion and literal matching
+in Isearch.  At the default of 2, Korean expansion also accepts a single
+precomposed modern Hangul syllable, allowing it to match its decomposed
+spelling.  Set this to 1 to expand single-character terms such as Hangul
+initials or romaji letters."
   :type 'natnum
   :group 'nucleo-completion)
 
@@ -271,7 +274,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defconst nucleo-completion-required-module-version "0.1.19"
+(defconst nucleo-completion-required-module-version "0.1.20"
   "Version of the prebuilt Rust module expected by this package.")
 
 (defcustom nucleo-completion-module-release-tag nil
@@ -3243,6 +3246,92 @@ interrupt expensive scoring."
                         "Fuzzy completion backed by nucleo-matcher."))
   (put 'nucleo 'completion--adjust-metadata
        #'nucleo-completion-adjust-metadata))
+
+;;;; Incremental buffer search
+
+(defvar nucleo-completion--isearch-regexp-cache nil
+  "Most recent language regexp, shared by Isearch and lazy highlighting.")
+
+;;;###autoload
+(define-minor-mode nucleo-completion-isearch-mode
+  "Automatically expand readings in ordinary Isearch.
+The available languages are set by `nucleo-completion-languages'."
+  :global t
+  :group 'nucleo-completion
+  (if nucleo-completion-isearch-mode
+      (progn
+        (add-hook 'isearch-mode-hook #'nucleo-completion--isearch-enable-expansion)
+        (advice-add 'isearch-search-and-update :before
+                    #'nucleo-completion--isearch-retry)
+        (advice-add 'isearch-update-from-string-properties :around
+                    #'nucleo-completion--isearch-restore-properties))
+    (remove-hook 'isearch-mode-hook #'nucleo-completion--isearch-enable-expansion)
+    (advice-remove 'isearch-search-and-update #'nucleo-completion--isearch-retry)
+    (advice-remove 'isearch-update-from-string-properties
+                   #'nucleo-completion--isearch-restore-properties)
+    (setq nucleo-completion--isearch-regexp-cache nil)))
+
+(defun nucleo-completion--isearch-enable-expansion ()
+  "Enable language expansion for a literal Isearch when available."
+  (when (and (not isearch-regexp)
+             (not isearch-regexp-function)
+             nucleo-completion-languages
+             (fboundp 'nucleo-completion-isearch-regexp))
+    (setq isearch-regexp-function #'nucleo-completion--isearch-regexp)))
+
+(defun nucleo-completion--isearch-restore-properties (restore string)
+  "Call RESTORE for STRING while retaining automatic language expansion."
+  (let ((expand (and isearch-mode
+                     (eq isearch-regexp-function
+                         #'nucleo-completion--isearch-regexp))))
+    (prog1 (funcall restore string)
+      ;; Literal history entries store a nil `isearch-regexp-function'.
+      (when expand
+        (nucleo-completion--isearch-enable-expansion)))))
+
+(defun nucleo-completion--isearch-regexp (query &optional _lax)
+  "Return an Isearch regexp for literal QUERY and its language readings."
+  (let ((literal (regexp-quote query)))
+    (if (and nucleo-completion-isearch-mode
+             (not (string-empty-p query))
+             (fboundp 'nucleo-completion-isearch-regexp))
+        (let* ((minimum (nucleo-completion--regexp-minimum-term-length))
+               (key (list query (copy-sequence nucleo-completion-languages)
+                          minimum case-fold-search
+                          (symbol-function 'nucleo-completion-isearch-regexp))))
+          (unless (equal key (car nucleo-completion--isearch-regexp-cache))
+            (setq nucleo-completion--isearch-regexp-cache
+                  (cons key (nucleo-completion--isearch-expand query literal minimum))))
+          (cdr nucleo-completion--isearch-regexp-cache))
+      literal)))
+
+(defun nucleo-completion--isearch-expand (query literal minimum)
+  "Add language alternatives for QUERY to LITERAL, subject to MINIMUM."
+  (let ((regexp literal)
+        (search-spaces-regexp nil))
+    (dolist (language nucleo-completion-languages regexp)
+      (when (or (>= (length query) minimum)
+                (and (eq language 'korean) (= minimum 2)
+                     (= (length query) 1) (<= ?가 (aref query 0) ?힣)))
+        (when-let* ((expansion (ignore-errors
+                                 (nucleo-completion-isearch-regexp language query)))
+                    ((and (stringp expansion) (not (string-empty-p expansion))))
+                    (combined (concat "\\(?:" regexp "\\|\\(?:" expansion "\\)\\)")))
+          ;; Emacs can reject a combined regexp even when each expansion
+          ;; fits the native module's size limit.
+          (when (nucleo-completion--valid-regexp-p combined)
+            (setq regexp combined)))))))
+
+(put 'nucleo-completion--isearch-regexp 'isearch-message-prefix "Nucleo ")
+
+(defun nucleo-completion--isearch-retry ()
+  "Retry Isearch when extending the input may produce a new reading."
+  (when (and isearch-mode
+             (eq isearch-regexp-function #'nucleo-completion--isearch-regexp))
+    ;; Isearch skips extensions of a failed literal query.  A new reading
+    ;; can match even after failure, or before the previous match.
+    (goto-char (max (point-min) (min (point-max) isearch-barrier)))
+    (setq isearch-success t isearch-adjusted t)))
 
 (nucleo-completion--maybe-prompt-module-install)
 
