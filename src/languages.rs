@@ -17,6 +17,7 @@ const CJK_IDEOGRAPH_END: u32 = 0x323af;
 const TONE_MARKS: &[u8] = b"!@#$";
 static PINYIN: OnceLock<BTreeMap<String, String>> = OnceLock::new();
 static PINYIN_TONES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+static PINYIN_INITIALS: OnceLock<HashMap<char, u32>> = OnceLock::new();
 
 fn pinyin_key(reading: Pinyin, with_tone: bool) -> Cow<'static, str> {
     let value = if with_tone {
@@ -225,6 +226,11 @@ fn pinyin_step(reading: &str, segment: &str, final_segment: bool) -> Option<Piny
 pub enum LanguageMatcher {
     Migemo(MigemoMatcher),
     Pinyin(PinyinMatcher),
+    PinyinInitials(PinyinInitialsMatcher),
+    PinyinWithInitials {
+        regular: Box<LanguageMatcher>,
+        initials: Box<LanguageMatcher>,
+    },
     Hangul(HangulMatcher),
     Filename(LanguageFilenameMatcher),
 }
@@ -236,12 +242,24 @@ impl LanguageMatcher {
         match self {
             Self::Migemo(matcher) => matcher.has_filename_priority(),
             Self::Filename(matcher) => matcher.has_filename_priority(),
+            Self::PinyinWithInitials { regular, initials } => {
+                regular.has_filename_priority() || initials.has_filename_priority()
+            }
             _ => false,
         }
     }
 
+    pub fn has_match_priority(&self) -> bool {
+        self.has_filename_priority() || matches!(self, Self::PinyinWithInitials { .. })
+    }
+
     pub fn match_quality(&self, text: &str, ignore_case: bool) -> Option<u8> {
         match self {
+            Self::PinyinWithInitials { regular, initials } => regular
+                .match_quality(text, ignore_case)
+                // Filename tiers and the literal-number tiebreak occupy 0–7.
+                .map(|quality| quality + (crate::filename::MAX_PRIORITY + 1) * 2)
+                .or_else(|| initials.match_quality(text, ignore_case)),
             Self::Migemo(matcher) => matcher.match_quality(text, ignore_case),
             Self::Filename(matcher) if matcher.has_filename_priority() => {
                 matcher.match_quality(text, ignore_case)
@@ -254,9 +272,81 @@ impl LanguageMatcher {
         match self {
             Self::Migemo(matcher) => matcher.find(text, start, ignore_case),
             Self::Pinyin(matcher) => matcher.find(text, start),
+            Self::PinyinInitials(matcher) => matcher.find(text, start),
+            Self::PinyinWithInitials { regular, initials } => {
+                let regular = regular.find(text, start, ignore_case);
+                let initials = initials.find(text, start, ignore_case);
+                // Highlight the earliest match; regular pinyin wins a tie.
+                match (regular, initials) {
+                    (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+                    (a, b) => a.or(b),
+                }
+            }
             Self::Hangul(matcher) => matcher.find(text, start, ignore_case),
             Self::Filename(matcher) => matcher.find(text, start, ignore_case),
         }
+    }
+}
+
+/// Match one ASCII initial per consecutive Han character, including heteronyms.
+pub struct PinyinInitialsMatcher {
+    initials: Vec<u32>,
+}
+
+impl PinyinInitialsMatcher {
+    pub fn new(term: &str) -> Option<Self> {
+        if !(2..=MAX_TERM_CHARACTERS).contains(&term.len())
+            || !term.bytes().all(|byte| byte.is_ascii_alphabetic())
+        {
+            return None;
+        }
+        let initials = term
+            .bytes()
+            .map(|byte| 1 << (byte.to_ascii_lowercase() - b'a'))
+            .collect();
+        Some(Self { initials })
+    }
+
+    /// Return a matching prefix end measured in characters.
+    pub fn prefix_ends<'a>(&'a self, text: &'a str) -> impl Iterator<Item = usize> + 'a {
+        if text.as_bytes().first().is_none_or(u8::is_ascii) {
+            return None.into_iter();
+        }
+        let index = PINYIN_INITIALS.get_or_init(|| {
+            let mut initials = HashMap::new();
+            for (reading, characters) in indexed_pinyin(false) {
+                let Some(initial) = reading.bytes().next().map(|byte| byte.to_ascii_lowercase())
+                else {
+                    continue;
+                };
+                if !initial.is_ascii_lowercase() {
+                    continue;
+                }
+                let bit = 1 << (initial - b'a');
+                for character in characters.chars() {
+                    *initials.entry(character).or_insert(0) |= bit;
+                }
+            }
+            initials
+        });
+        let mut characters = text.chars();
+        let matches = self.initials.iter().all(|initial| {
+            characters.next().is_some_and(|character| {
+                index
+                    .get(&character)
+                    .is_some_and(|bits| bits & initial != 0)
+            })
+        });
+        matches.then_some(self.initials.len()).into_iter()
+    }
+
+    pub fn find(&self, text: &str, start: usize) -> Option<(usize, usize)> {
+        for (offset, (byte_offset, _)) in text.char_indices().enumerate().skip(start) {
+            if let Some(end) = self.prefix_ends(&text[byte_offset..]).next() {
+                return Some((offset, offset + end));
+            }
+        }
+        None
     }
 }
 
@@ -411,6 +501,44 @@ pub fn hangul_regexp(term: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pinyin_initials_match_heteronyms_and_character_offsets() {
+        let matcher = PinyinInitialsMatcher::new("ZGGS").unwrap();
+        assert_eq!(matcher.find("😀中国公司 中国公司", 0), Some((1, 5)));
+        assert_eq!(matcher.find("😀中国公司 中国公司", 5), Some((6, 10)));
+        assert_eq!(matcher.find("中-国公司", 0), None);
+        assert_eq!(
+            matcher.prefix_ends("中国公司.txt").collect::<Vec<_>>(),
+            vec![4]
+        );
+        assert_eq!(
+            PinyinInitialsMatcher::new("yh").unwrap().find("银行", 0),
+            Some((0, 2))
+        );
+        assert_eq!(
+            PinyinInitialsMatcher::new("yx").unwrap().find("银行", 0),
+            Some((0, 2))
+        );
+        for invalid in ["z", "z1", "z'g", "中g", ""] {
+            assert!(PinyinInitialsMatcher::new(invalid).is_none(), "{invalid}");
+        }
+        assert!(PinyinInitialsMatcher::new(&"z".repeat(33)).is_none());
+    }
+
+    #[test]
+    fn pinyin_initials_wrapper_ranks_regular_and_highlights_earliest() {
+        let matcher = LanguageMatcher::PinyinWithInitials {
+            regular: Box::new(LanguageMatcher::Pinyin(PinyinMatcher::new("sh").unwrap())),
+            initials: Box::new(LanguageMatcher::PinyinInitials(
+                PinyinInitialsMatcher::new("sh").unwrap(),
+            )),
+        };
+        assert!(matcher.has_match_priority());
+        assert_eq!(matcher.match_quality("时", true), Some(8));
+        assert_eq!(matcher.match_quality("四海", true), Some(0));
+        assert_eq!(matcher.find("四海 时", 0, true), Some((0, 2)));
+    }
+
     #[test]
     fn pinyin_matches_ambiguous_terms_and_character_ranges_directly() {
         let matcher = PinyinMatcher::new("yinhang").unwrap();

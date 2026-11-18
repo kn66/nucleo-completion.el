@@ -4,7 +4,7 @@
 
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
-;; Version: 0.1.18
+;; Version: 0.1.19
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
@@ -67,6 +67,8 @@
                   (matcher text start ignore-case))
 (declare-function nucleo-completion-filename-match-priority
                   "ext:nucleo-completion-module" (matchers text ignore-case))
+(declare-function nucleo-completion-language-match-priority
+                  "ext:nucleo-completion-module" (matchers text ignore-case))
 (declare-function mm-destroy-parts "mm-decode")
 (declare-function mm-dissect-buffer "mm-decode")
 (declare-function mm-save-part-to-file "mm-decode")
@@ -96,11 +98,10 @@ Large values can decrease performance."
 
 (defcustom nucleo-completion-languages '(japanese)
   "Languages to use for additional completion matches.
-Japanese uses the bundled Migemo dictionary; Chinese uses pinyin,
-and Korean uses Hangul initial consonants.  Expansions are available
-when the loaded module provides the corresponding functions.  They
-are combined with `nucleo-completion-regexp-functions' and respect
-`nucleo-completion-regexp-minimum-term-length'."
+Japanese uses the bundled Migemo dictionary, Chinese uses pinyin,
+and Korean uses Hangul syllables and initials.  The loaded module
+provides these matchers.  See `nucleo-completion-regexp-minimum-term-length'
+for when they are combined with `nucleo-completion-regexp-functions'."
   :type '(set (const :tag "Japanese (Migemo)" japanese)
               (const :tag "Chinese (pinyin)" chinese)
               (const :tag "Korean (initial consonants)" korean))
@@ -115,6 +116,15 @@ The built-in fuzzy subsequence matcher is always used.  Regexps
 from this option are ORed with it for each term, while terms are
 ANDed together."
   :type '(repeat function)
+  :group 'nucleo-completion)
+
+(defcustom nucleo-completion-pinyin-initials nil
+  "Whether Chinese completion also accepts pinyin initials.
+When Chinese is enabled, search for consecutive Han characters by
+the first letter of each pinyin syllable.  For example, `zggs' can
+find 中国公司.  Full pinyin matches have higher priority within
+the same group of language-only results."
+  :type 'boolean
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-migemo-dictionary-files nil
@@ -137,10 +147,12 @@ same function are still ignored, but are not reported again."
 
 (defcustom nucleo-completion-regexp-minimum-term-length 2
   "Minimum search term length for calling regexp expanders.
-Terms shorter than this value use only the built-in fuzzy matcher.
-The default avoids broad one-character regexp expansions from tools
-such as Migemo.  Set this to 1 to run regexp expanders for
-single-character terms too."
+Terms shorter than this value use only the built-in fuzzy matcher,
+except that at the default of 2, the built-in Korean matcher also
+accepts a single precomposed modern Hangul syllable.  This allows
+matching its decomposed spelling without enabling broad one-character
+expansions such as Hangul initials or Migemo.  Set this to 1 to run
+all regexp expanders for single-character terms too."
   :type 'natnum
   :group 'nucleo-completion)
 
@@ -259,7 +271,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defconst nucleo-completion-required-module-version "0.1.18"
+(defconst nucleo-completion-required-module-version "0.1.19"
   "Version of the prebuilt Rust module expected by this package.")
 
 (defcustom nucleo-completion-module-release-tag nil
@@ -441,6 +453,16 @@ When CACHE is not a hash table, call PRODUCER without caching."
   "Compile a pinyin matcher for TERM."
   (nucleo-completion-language-matcher 'chinese term))
 
+(defun nucleo-completion--pinyin-initials-enabled-p ()
+  "Return non-nil when the loaded module can add pinyin initials."
+  (and nucleo-completion-pinyin-initials
+       (memq 'chinese nucleo-completion-languages)
+       (fboundp 'nucleo-completion-language-match-priority)))
+
+(defun nucleo-completion--pinyin-with-initials-matcher (term)
+  "Compile a full pinyin and initials matcher for TERM."
+  (nucleo-completion-language-matcher 'chinese-with-initials term))
+
 (defun nucleo-completion--hangul-matcher (term)
   "Compile a Hangul initial matcher for TERM."
   (nucleo-completion-language-matcher 'korean term))
@@ -466,7 +488,10 @@ module here because the normal completion path handles module loading."
                                       regexp)
                    when (and (memq language nucleo-completion-languages)
                              (fboundp function))
-                   collect function)))
+                   collect (if (and (eq function 'nucleo-completion--pinyin-matcher)
+                                    (nucleo-completion--pinyin-initials-enabled-p))
+                               'nucleo-completion--pinyin-with-initials-matcher
+                             function))))
 
 (defmacro nucleo-completion--with-completion-pass-caches (&rest body)
   "Run BODY with caches shared by one completion filtering pass.
@@ -983,13 +1008,26 @@ Old binaries remain because another Emacs process may still use them."
 
 (defun nucleo-completion--regexp-function-regexps-uncached (term)
   "Return uncached regexp and native language alternatives for TERM."
-  (when (>= (length term) (nucleo-completion--regexp-minimum-term-length))
-    (cl-loop for function in (nucleo-completion--regexp-expanders)
+  (let* ((minimum (nucleo-completion--regexp-minimum-term-length))
+         (expanders
+          (cond
+           ((>= (length term) minimum)
+            (nucleo-completion--regexp-expanders))
+           ;; A complete syllable has a canonical decomposed spelling, but
+           ;; running other expanders here would also broaden short queries.
+           ((and (= minimum 2) (= (length term) 1)
+                 (<= #xac00 (aref term 0) #xd7a3)
+                 (memq 'korean nucleo-completion-languages))
+            (let ((nucleo-completion-languages '(korean))
+                  (nucleo-completion-regexp-functions nil))
+              (nucleo-completion--regexp-expanders))))))
+    (cl-loop for function in expanders
              for value = (nucleo-completion--regexp-function-value
                           function term)
              append (cond
                      ((and (memq function '(nucleo-completion--migemo-matcher
                                             nucleo-completion--pinyin-matcher
+                                            nucleo-completion--pinyin-with-initials-matcher
                                             nucleo-completion--hangul-matcher))
                            (user-ptrp value))
                       (list value))
@@ -1913,17 +1951,23 @@ Walk SCORABLE once."
   "Return synthetic top-info entries for regexp-only CANDIDATES with SCORE."
   (mapcar (lambda (candidate) (list candidate score nil)) candidates))
 
-(defun nucleo-completion--order-regexp-only-filenames (needle candidates)
-  "Prefer filename matches for NEEDLE while keeping equal CANDIDATES in order."
-  (let ((matchers
-         (when (and (cdr candidates)
-                    nucleo-completion-languages
-                    (fboundp 'nucleo-completion-filename-match-priority))
-           (cl-loop for term in (nucleo-completion--terms needle)
-                    when (string-match-p "[.．]" term)
-                    append (cl-remove-if-not
-                            #'user-ptrp
-                            (nucleo-completion--regexp-function-regexps term))))))
+(defun nucleo-completion--order-regexp-only-language-matches (needle candidates)
+  "Rank language matches for NEEDLE while keeping equal CANDIDATES in order."
+  (let* ((initials (nucleo-completion--pinyin-initials-enabled-p))
+         (priority-function
+          (cond
+           (initials #'nucleo-completion-language-match-priority)
+           ((fboundp 'nucleo-completion-filename-match-priority)
+            #'nucleo-completion-filename-match-priority)))
+         (matchers
+          (when (and (cdr candidates)
+                     nucleo-completion-languages
+                     priority-function)
+            (cl-loop for term in (nucleo-completion--terms needle)
+                     when (or initials (string-match-p "[.．]" term))
+                     append (cl-remove-if-not
+                             #'user-ptrp
+                             (nucleo-completion--regexp-function-regexps term))))))
     (if (null matchers)
         candidates
       (let ((ranked
@@ -1931,8 +1975,7 @@ Walk SCORABLE once."
               (lambda (candidate)
                 (cons
                  (condition-case err
-                     (nucleo-completion-filename-match-priority
-                      matchers candidate completion-ignore-case)
+                     (funcall priority-function matchers candidate completion-ignore-case)
                    (wrong-type-argument
                     (unless (nucleo-completion--module-unicode-error-p err)
                       (signal (car err) (cdr err)))
@@ -1943,11 +1986,11 @@ Walk SCORABLE once."
                                   (> (aref candidate (1- end))
                                      nucleo-completion--max-unicode-codepoint))
                         (setq end (1- end)))
-                      (nucleo-completion-filename-match-priority
-                       matchers
-                       (nucleo-completion--language-match-text
-                        (substring candidate 0 end))
-                       completion-ignore-case))))
+                      (funcall priority-function
+                               matchers
+                               (nucleo-completion--language-match-text
+                                (substring candidate 0 end))
+                               completion-ignore-case))))
                  candidate))
               candidates)))
         (mapcar #'cdr (cl-stable-sort ranked #'> :key #'car))))))
@@ -1989,7 +2032,7 @@ it is nil, instead of scanning SCORABLE.  Candidates are partitioned
 according to `nucleo-completion-regexp-only-match-priority'."
   (pcase-let* ((`(,module-candidates ,top-info ,full-scores) bundle)
                (extra (if precomputed-extra-p precomputed-extra
-                        (nucleo-completion--order-regexp-only-filenames
+                        (nucleo-completion--order-regexp-only-language-matches
                          needle
                          (nucleo-completion--regexp-only-candidates
                           needle scorable module-candidates)))))
@@ -2691,6 +2734,7 @@ The callback retains only this result's pass caches and settings."
   (let ((regexp-cache nucleo-completion--regexp-cache)
         (terms-cache nucleo-completion--terms-cache)
         (languages (copy-sequence nucleo-completion-languages))
+        (pinyin-initials nucleo-completion-pinyin-initials)
         (migemo-files (copy-sequence nucleo-completion-migemo-dictionary-files))
         (regexp-functions (copy-sequence nucleo-completion-regexp-functions))
         (minimum-term-length nucleo-completion-regexp-minimum-term-length)
@@ -2706,6 +2750,7 @@ The callback retains only this result's pass caches and settings."
             (let* ((nucleo-completion--regexp-cache regexp-cache)
                    (nucleo-completion--terms-cache terms-cache)
                    (nucleo-completion-languages languages)
+                   (nucleo-completion-pinyin-initials pinyin-initials)
                    (nucleo-completion-migemo-dictionary-files migemo-files)
                    (nucleo-completion-regexp-functions regexp-functions)
                    (nucleo-completion-regexp-minimum-term-length minimum-term-length)

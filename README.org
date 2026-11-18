@@ -124,7 +124,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.18")
+  (setq nucleo-completion-module-release-tag "v0.1.19")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -186,7 +186,7 @@ automatically after every push to ~main~.  It builds modules named
 
 After validation and all four platform-specific load checks succeed, the
 workflow automatically publishes a GitHub Release named after the Cargo package
-version, for example ~v0.1.18~.  The release includes the four modules, their
+version, for example ~v0.1.19~.  The release includes the four modules, their
 checksums, and license notices.  The module installer downloads these published
 Release assets, so no manual release step is needed for a new package version.
 
@@ -392,35 +392,47 @@ the final syllable to be incomplete.  Spellings using ~ü~, ~v~, or ~u:~ are
 equivalent: ~lü~, ~lv~, and ~lu:~ can all find ~绿~.  An apostrophe explicitly
 separates syllables: ~xi'an~ finds ~西安~ without also matching ~先~, while
 ~xian~ considers both divisions.  Tone matching uses each character's possible
-readings.  Pinyin initials are unsupported.  Digits can also be literal
+readings.  Set ~nucleo-completion-pinyin-initials~ to non-nil to enable
+initials for Chinese completion.  For example, ~zggs~ finds ~中国公司~
+and ~zggs.txt~ finds ~中国公司.txt~.  Each letter represents one consecutive
+Han character, using the first letter of a pinyin syllable.  At least two
+initials are required.  Full pinyin matches rank ahead of initials-only
+matches in the same language result group.  Digits can also be literal
 filename text.  For example, ~zhongguo2026~ finds ~中国2026~, and ambiguous
-~zhongguo2~ can find both ~中国~ and ~中国2~.
+~zhongguo2~ can find both ~中国~ and ~中国2~.  When the query includes an
+extension, ~zhongguo2.txt~ prefers ~中国2.txt~ over ~中国.txt~ within the
+same filename ranking tier.
 Korean search accepts initial consonants, such as ~ㄱㅅ~ for ~감사~, including
 modern conjoining initials.  Complete syllables also match across composed
 and decomposed spellings.  For example, ~감사~ can find ~감사.txt~ and
 ~감사~ can find ~감사.txt~.  ASCII letters and digits can be mixed with
 Hangul syllables and initials.  Highlighting uses the characters in the
-original candidate.  The legacy Hangul regexp can match a syllable prefix
+original candidate.  Separate readings can be combined with literal separators
+and suffixes: ~zhongguo_huiyi.txt~ finds ~中国_会议.txt~, and
+~ㄱㅅ_ㅎㅇ.txt~ finds ~감사_회의.txt~, including decomposed Hangul spellings.
+The legacy Hangul regexp can match a syllable prefix
 when a decomposed spelling has a trailing jamo.  Direct completion checks
 the complete syllable.
 
 The language matchers accept fullwidth ASCII letters, digits, and supported
-separators in the query.  For example, ~ｋｅｉｊｉ~ finds ~軽自~ and
-~nihon－report．txt~ finds ~日本-report.txt~.  The right single quotation mark
-works as an apostrophe in readings such as ~kan’i~ and ~xi’an~.
+separators in queries and filename candidates.  For example, ~ｋｅｉｊｉ~
+finds ~軽自~, ~nihon－report．txt~ finds ~日本-report.txt~, and ~kaigi2026~
+finds ~会議２０２６.txt~.  Completion returns the original filename.  The
+right single quotation mark works as an apostrophe in readings such as
+~kan’i~ and ~xi’an~.
 
 Language matches use the same regexp-only ordering and highlighting described
 below.  Each term can use a language match or a fuzzy match, so ~nihon rpt~
 can find ~日本-report.txt~.
-The existing two-character minimum also applies to language search.  Long or
-unsupported terms fall back to ordinary fuzzy matching.  Japanese expansion
-accepts at most 32 characters, including ASCII letters, hyphens for long vowels,
-apostrophes after ~n~, and attached filename suffixes.  Chinese input accepts
-at most 32 characters, including syllable separators and the colon in ~u:~.
-Korean terms accept at most 32 characters.  Japanese, Chinese, and Korean
-use direct native matching, so ambiguous Chinese inputs do not require a large
-regexp.  Older modules fall back to the legacy regexp expanders, whose Chinese
-expansions are bounded.
+At the default two-character minimum, a single complete Hangul syllable can
+also match a decomposed filename.  For example, ~감~ finds ~감.txt~.
+The minimum applies to initial-only queries and custom expanders.  Each
+language reading can contain up to 32 characters.  Japanese readings
+support ASCII letters, hyphens for long vowels, and apostrophes after ~n~.
+Pinyin readings support syllable separators, tones, and the colon in ~u:~.
+Unsupported readings fall back to ordinary fuzzy matching.  The three
+languages use direct native matching.  Older modules use the legacy
+regexp expanders, whose Chinese expansions are bounded.
 
 Language data is initialized lazily on first use.  Without the Rust module,
 language expansion is unavailable, while fuzzy matching and user-configured
@@ -449,7 +461,16 @@ for ~会議-2026.org~, ~nihon_report~ for ~日本_report.txt~, and
 ~nihon-report~ for ~日本-report.txt~.  A hyphen can still be read as a
 long vowel, so ~ko-hi-2026~ finds
 ~コーヒー2026~.  Leading digits work as well.  For example, ~2026kaigi~
-finds ~2026会議.org~.
+finds ~2026会議.org~.  Literal ASCII prefixes can precede a hyphen or
+underscore.  For example, ~report-nihon.txt~ finds ~report-日本.txt~,
+~report-zhongguo.txt~ finds ~report-中国.txt~, and ~report-감사.txt~ finds
+~report-감사.txt~.  An underscore can also join independent Japanese
+readings.  The query ~nihon_kaigi.txt~ finds ~日本_会議.txt~ as well as
+~日本_kaigi.txt~.
+Filename inputs may contain up to 255 characters.  Their literal prefixes
+and suffixes use this separate limit.  For example,
+~nihon_report-2026-11-19-final-v03.txt~ finds
+~日本_report-2026-11-19-final-v03.txt~.
 A suffix starting with a dot can follow more characters
 in the same filename component, so ~pa-to.txt~ finds ~パートナー.txt~.
 The search stops at slashes, backslashes, and line breaks.  Dots in compound
@@ -485,7 +506,8 @@ configuration normally does not need its own per-term cache.  Lazy highlighting
 retains the result's expansion cache and relevant settings for its callback
 lifetime, so drawing additional rows does not regenerate the same regexps.
 The default ~nucleo-completion-regexp-minimum-term-length~ is 2, so expanders do
-not run for one-character terms unless you lower that option.
+not run for one-character terms unless you lower that option.  The built-in
+Hangul matcher accepts a complete syllable at the default minimum.
 If an expander signals an error, it is ignored.  To diagnose expander failures,
 set ~nucleo-completion-report-regexp-function-errors~ to non-nil; each failing
 function is then reported once with ~display-warning~.
@@ -613,6 +635,11 @@ After rebuilding the module, restart graphical Emacs and check:
 - Configure a local UTF-8 Migemo dictionary and check its candidates and
   highlights alongside bundled matches.  Edit the file and confirm a later
   completion uses the updated entries.
+- Check ~nihon_report-2026-11-19-final-v03.txt~ and the corresponding
+  ~zhongguo~ query against files with long literal suffixes.  Check
+  ~report-nihon.txt~, ~report-zhongguo.txt~, and ~report-감사.txt~ against
+  literal prefixes, including decomposed Hangul.  Check ~nihon_kaigi.txt~
+  against both ~日本_会議.txt~ and ~日本_kaigi.txt~.
 - Enable all three languages and check ~zhongguo~ against ~中国~ and ~ㄱㅅ~
   against ~감사~.  Check mixed terms such as ~nihon txt~ against ~日本.txt~.
   Check ~zhongguo.txt~ and ~ㄱㅅ.txt~ against filenames with exact and longer
@@ -624,14 +651,21 @@ After rebuilding the module, restart graphical Emacs and check:
   ~xi'an~ against ~西安~ and ~先~.  Only ~西安~ should match the separated input.
   Check ~zhōngguó~ and ~zhong1guo2~ against ~中国~, and verify an incorrect
   tone does not match.  Check ~zhongguo2026~ against ~中国2026~ and
-  ~zhongguo2~ against both ~中国~ and ~中国2~.
+  ~zhongguo2~ against both ~中国~ and ~中国2~.  Check
+  ~zhongguo_huiyi.txt~ against ~中国_会议.txt~.  Enable
+  ~nucleo-completion-pinyin-initials~ and check ~zggs.txt~ against
+  ~中国公司.txt~; ordinary pinyin results should precede initials-only results.
 - Check ~yinhang~ against both ~银行~ and ~銀行~.  Check ~ㄱㅅ~ against ~감사~
   and its decomposed spelling ~감사~.  The full matched text should be
   highlighted in each case.  Repeat with a complete ~감사~ query against a
   decomposed filename and a decomposed ~감사~ query against a composed
-  filename.
+  filename.  Check ~ㄱㅅ_ㅎㅇ.txt~ against composed and decomposed
+  spellings of ~감사_회의.txt~.
 - Check ~ｋｅｉｊｉ~, ~nihon－report．txt~, and ~xi’an~ against ~軽自~,
   ~日本-report.txt~, and ~西安~.  Check that ~先~ is excluded for ~xi’an~.
+- Complete ~nihon-report.txt~ to ~日本－ｒｅｐｏｒｔ．ｔｘｔ~ and open the
+  file.  Check that ~감~ finds ~감.txt~ and that ~zhongguo2.txt~ places
+  ~中国2.txt~ ahead of ~中国.txt~.
 - With lazy highlighting, scroll through language results and check consistent
   highlighting after changing buffers; a new completion must use its own
   language and case settings.

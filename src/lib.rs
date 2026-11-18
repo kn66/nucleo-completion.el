@@ -36,15 +36,15 @@ struct CandidateScan<'e, T> {
 struct RegexpOnlyCandidate<'e> {
     value: Value<'e>,
     non_ascii: bool,
-    filename_priority: u8,
+    match_priority: u8,
 }
 
-fn order_regexp_only_filenames(candidates: &mut [RegexpOnlyCandidate<'_>]) {
+fn order_regexp_only_matches(candidates: &mut [RegexpOnlyCandidate<'_>]) {
     if candidates
         .iter()
-        .any(|candidate| candidate.filename_priority > 0)
+        .any(|candidate| candidate.match_priority > 0)
     {
-        candidates.sort_by_key(|candidate| Reverse(candidate.filename_priority));
+        candidates.sort_by_key(|candidate| Reverse(candidate.match_priority));
     }
 }
 
@@ -215,14 +215,14 @@ fn score_lisp_candidates<'e>(
                 scored_lisp_candidate(pattern, value, index, &text, matcher, &mut utf32_buf)
             {
                 matches.push(candidate);
-            } else if let Some(filename_priority) = regexp_scan
+            } else if let Some(match_priority) = regexp_scan
                 .as_mut()
                 .and_then(|(groups, scratch)| groups.match_quality(&text, scratch))
             {
                 regexp_only.push(RegexpOnlyCandidate {
                     value,
                     non_ascii: !text.is_ascii(),
-                    filename_priority,
+                    match_priority,
                 });
             }
             list = list.cdr()?;
@@ -232,7 +232,7 @@ fn score_lisp_candidates<'e>(
             }
         }
 
-        order_regexp_only_filenames(&mut regexp_only);
+        order_regexp_only_matches(&mut regexp_only);
         Ok(Some(CandidateScan {
             matches,
             regexp_only,
@@ -296,14 +296,14 @@ fn score_lisp_candidates_with_ties<'e>(
                 &mut utf32_buf,
             ) {
                 matches.push(candidate);
-            } else if let Some(filename_priority) = regexp_scan
+            } else if let Some(match_priority) = regexp_scan
                 .as_mut()
                 .and_then(|(groups, scratch)| groups.match_quality(&text, scratch))
             {
                 regexp_only.push(RegexpOnlyCandidate {
                     value,
                     non_ascii: !text.is_ascii(),
-                    filename_priority,
+                    match_priority,
                 });
             }
             list = list.cdr()?;
@@ -313,7 +313,7 @@ fn score_lisp_candidates_with_ties<'e>(
             }
         }
 
-        order_regexp_only_filenames(&mut regexp_only);
+        order_regexp_only_matches(&mut regexp_only);
         Ok(Some(CandidateScan {
             matches,
             regexp_only,
@@ -935,12 +935,10 @@ fn candidates_with_options<'e>(
 // text and generic fuzzy patterns must retain their original characters.
 fn normalize_language_query(query: &str) -> Cow<'_, str> {
     fn normalize_char(ch: char) -> char {
-        match ch {
-            'Ａ'..='Ｚ' | 'ａ'..='ｚ' | '０'..='９' | '－' | '＿' | '．' | '＇' | '：' => {
-                char::from_u32(ch as u32 - 0xfee0).unwrap()
-            }
-            '’' => '\'',
-            _ => ch,
+        if ch == '’' {
+            '\''
+        } else {
+            filename::fold_width(ch)
         }
     }
 
@@ -1007,17 +1005,21 @@ fn hangul_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
 }
 
 /// Compile TERM for direct matching in LANGUAGE.
+/// The language symbol chinese-with-initials also accepts pinyin initials.
 /// Return an opaque matcher, or nil for an unsupported term or language.
 #[defun]
 fn language_matcher<'e>(env: &'e Env, language: Value<'e>, term: String) -> Result<Value<'e>> {
     use language_filename::{FilenameLanguage, LanguageFilenameMatcher};
-    use languages::{LanguageMatcher, PinyinMatcher};
+    use languages::{LanguageMatcher, PinyinInitialsMatcher, PinyinMatcher};
 
     let term = normalize_language_query(&term);
-    let matcher = if language == env.intern("chinese")? {
+    let pinyin = || {
         LanguageFilenameMatcher::new(&term, FilenameLanguage::Pinyin)
             .map(LanguageMatcher::Filename)
             .or_else(|| PinyinMatcher::new(&term).map(LanguageMatcher::Pinyin))
+    };
+    let matcher = if language == env.intern("chinese")? {
+        pinyin()
     } else if language == env.intern("korean")? {
         hangul::HangulMatcher::new(&term)
             .map(LanguageMatcher::Hangul)
@@ -1025,6 +1027,18 @@ fn language_matcher<'e>(env: &'e Env, language: Value<'e>, term: String) -> Resu
                 LanguageFilenameMatcher::new(&term, FilenameLanguage::Hangul)
                     .map(LanguageMatcher::Filename)
             })
+    } else if language == env.intern("chinese-with-initials")? {
+        let regular = pinyin();
+        let initials = LanguageFilenameMatcher::new(&term, FilenameLanguage::PinyinInitials)
+            .map(LanguageMatcher::Filename)
+            .or_else(|| PinyinInitialsMatcher::new(&term).map(LanguageMatcher::PinyinInitials));
+        match (regular, initials) {
+            (Some(regular), Some(initials)) => Some(LanguageMatcher::PinyinWithInitials {
+                regular: Box::new(regular),
+                initials: Box::new(initials),
+            }),
+            (regular, initials) => regular.or(initials),
+        }
     } else {
         None
     };
@@ -1052,19 +1066,48 @@ fn language_match<'e>(
 #[defun]
 fn filename_match_priority<'e>(
     env: &'e Env,
-    mut matchers: Value<'e>,
+    matchers: Value<'e>,
     text: String,
     ignore_case: Value<'e>,
+) -> Result<Value<'e>> {
+    best_match_priority(
+        env,
+        matchers,
+        &text,
+        ignore_case.is_not_nil(),
+        languages::LanguageMatcher::has_filename_priority,
+    )
+}
+
+/// Return the best language match priority among MATCHERS for TEXT.
+#[defun]
+fn language_match_priority<'e>(
+    env: &'e Env,
+    matchers: Value<'e>,
+    text: String,
+    ignore_case: Value<'e>,
+) -> Result<Value<'e>> {
+    best_match_priority(
+        env,
+        matchers,
+        &text,
+        ignore_case.is_not_nil(),
+        languages::LanguageMatcher::has_match_priority,
+    )
+}
+
+fn best_match_priority<'e>(
+    env: &'e Env,
+    mut matchers: Value<'e>,
+    text: &str,
+    ignore_case: bool,
+    rankable: impl Fn(&languages::LanguageMatcher) -> bool,
 ) -> Result<Value<'e>> {
     let mut priority = 0;
     while matchers.is_not_nil() {
         let matcher = matchers.car::<&languages::LanguageMatcher>()?;
-        if matcher.has_filename_priority() {
-            priority = priority.max(
-                matcher
-                    .match_quality(&text, ignore_case.is_not_nil())
-                    .unwrap_or(0),
-            );
+        if rankable(matcher) {
+            priority = priority.max(matcher.match_quality(text, ignore_case).unwrap_or(0));
         }
         matchers = matchers.cdr()?;
     }

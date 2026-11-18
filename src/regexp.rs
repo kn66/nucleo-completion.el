@@ -48,9 +48,9 @@ impl CandidateMatcher<'_> {
         }
     }
 
-    fn has_filename_priority(&self) -> bool {
+    fn has_match_priority(&self) -> bool {
         match self {
-            Self::Language(matcher) => matcher.has_filename_priority(),
+            Self::Language(matcher) => matcher.has_match_priority(),
             #[cfg(test)]
             Self::Counted(_, _, rankable) => *rankable,
             _ => false,
@@ -142,7 +142,7 @@ impl<'e> RegexpGroups<'e> {
         let rankable: Vec<usize> = matchers
             .iter()
             .enumerate()
-            .filter_map(|(index, matcher)| matcher.has_filename_priority().then_some(index))
+            .filter_map(|(index, matcher)| matcher.has_match_priority().then_some(index))
             .collect();
         let memoize = count > matchers.len() || !rankable.is_empty();
         Ok(Some(Self {
@@ -169,7 +169,7 @@ impl<'e> RegexpGroups<'e> {
         }
     }
 
-    /// Match an AND of OR groups, returning the best matching filename priority.
+    /// Match an AND of OR groups, returning the best language match priority.
     pub fn match_quality(&self, text: &str, scratch: &mut RegexpScratch) -> Option<u8> {
         scratch.results.fill(None);
         for group in &self.groups {

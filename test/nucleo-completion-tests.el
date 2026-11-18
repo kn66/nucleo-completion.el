@@ -2659,6 +2659,179 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (cl-loop for i from 1 below (length highlighted)
                  do (should (get-text-property i 'face highlighted)))))))
 
+(ert-deftest nucleo-completion-native-compound-language-filenames-test ()
+  "Match independent readings and preserve literal filename suffixes."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)))
+  (let ((nucleo-completion-regexp-functions nil))
+    (dolist (threshold '(1 100))
+      (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+        (dolist (case '(((chinese) "zhongguo_huiyi.txt" "中国_会议.txt"
+                         "中国_会议.txt.bak" "中国_会议.org")
+                        ((korean) "ㄱㅅ_ㅎㅇ.txt" "감사_회의.txt"
+                         "감사_회의.txt.bak" "감사_회의.org")
+                        ((korean) "ㄱㅅ_ㅎㅇ.txt" "감사_회의.txt"
+                         "감사_회의.txt.bak" "감사_회의.org")))
+          (let* ((nucleo-completion-languages (car case))
+                 (query (nth 1 case))
+                 (candidate (nth 2 case))
+                 (results (nucleo-completion-tests--plain
+                           (nucleo-completion-all-completions
+                            query (list (nth 4 case) (nth 3 case) candidate))))
+                 (highlighted (nucleo-completion-highlight
+                               query (concat "😀" candidate))))
+            (should (equal results (list candidate (nth 3 case))))
+            (should-not (get-text-property 0 'face highlighted))
+            (cl-loop for index from 1 below (length highlighted)
+                     do (should (get-text-property index 'face highlighted)))))))
+    (dolist (case '((nucleo-completion-pinyin-regexp "zhongguo_huiyi.txt"
+                     "中国_会议.txt" "中国_huiyi.txt" "中国/会议.txt")
+                    (nucleo-completion-hangul-regexp "ㄱㅅ_ㅎㅇ.txt"
+                     "감사_회의.txt" "감사_ㅎㅇ.txt" "감사/회의.txt")))
+      (let ((regexp (funcall (car case) (nth 1 case))))
+        (should (string-match-p regexp (nth 2 case)))
+        (should (string-match-p regexp (nth 3 case)))
+        (should-not (string-match-p regexp (nth 4 case)))))))
+
+(ert-deftest nucleo-completion-native-pinyin-initials-test ()
+  "Initials are optional and rank after ordinary pinyin matches."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-match-priority)))
+  (let ((nucleo-completion-regexp-functions nil)
+        (nucleo-completion-languages '(chinese)))
+    (dolist (threshold '(1 100))
+      (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+        (let ((nucleo-completion-pinyin-initials nil))
+          (should-not (member "中国公司" (nucleo-completion-tests--plain
+                                         (nucleo-completion-all-completions
+                                          "zggs" '("中国公司"))))))
+        (let ((nucleo-completion-pinyin-initials t))
+          (dolist (query '("zggs" "ZGGS"))
+            (should (member "中国公司" (nucleo-completion-tests--plain
+                                        (nucleo-completion-all-completions
+                                         query '("中国公司" "中国-公司"))))))
+          (should-not (member "中国-公司" (nucleo-completion-tests--plain
+                                          (nucleo-completion-all-completions
+                                           "zggs" '("中国-公司")))))
+          (should-not (member "中国" (nucleo-completion-tests--plain
+                                      (nucleo-completion-all-completions
+                                       "z" '("中国")))))
+          (should (equal (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "sh" '("四海" "时"))) '("时" "四海")))
+          (should (equal (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "zggs.txt" '("中国公司.txt.bak" "中国公司.txt")))
+                         '("中国公司.txt" "中国公司.txt.bak")))
+          (should (equal (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "zhongguo_hy.txt" '("中国_会议.txt" "中国/会议.txt")))
+                         '("中国_会议.txt")))
+          (let ((highlighted (nucleo-completion-highlight
+                              "zggs.txt" (copy-sequence "😀中国公司.txt"))))
+            (should-not (get-text-property 0 'face highlighted))
+            (cl-loop for index from 1 below (length highlighted)
+                     do (should (get-text-property index 'face highlighted)))))
+        (let ((nucleo-completion-languages nil)
+              (nucleo-completion-pinyin-initials t))
+          (should-not (member "中国公司" (nucleo-completion-tests--plain
+                                         (nucleo-completion-all-completions
+                                          "zggs" '("中国公司"))))))))))
+
+(ert-deftest nucleo-completion-pinyin-initials-completion-context-test ()
+  "Changing initials invalidates reuse while lazy highlighting keeps its settings."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-match-priority)))
+  (let* ((nucleo-completion-languages '(chinese))
+         (nucleo-completion-regexp-functions nil)
+         (nucleo-completion-pinyin-initials t)
+         (completion-lazy-hilit t)
+         (completion-lazy-hilit-fn nil)
+         (table '("中国公司"))
+         (context (nucleo-completion--completion-context table nil nil)))
+    (should (member "中国公司" (nucleo-completion-all-completions "zggs" table)))
+    (should (functionp completion-lazy-hilit-fn))
+    (let ((nucleo-completion-pinyin-initials nil))
+      (should-not (nucleo-completion--completion-context-matches-p context table nil nil))
+      (let ((highlighted (funcall completion-lazy-hilit-fn (copy-sequence "中国公司"))))
+        (dotimes (index (length highlighted))
+          (should (get-text-property index 'face highlighted)))))))
+
+(ert-deftest nucleo-completion-native-language-filename-parts-test ()
+  "Match long literal affixes, literal prefixes, and independent readings."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)
+                    (fboundp 'nucleo-completion-migemo-matcher)))
+  (let ((nucleo-completion-regexp-functions nil)
+        (nucleo-completion-migemo-dictionary-files nil))
+    (dolist (threshold '(1 100))
+      (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+        (dolist (case '(((japanese) "nihon_report-2026-11-19-final-v03.txt" "日本_report-2026-11-19-final-v03.txt" "日本_report-2026-11-19-final-v04.txt")
+                        ((chinese) "zhongguo_report-2026-11-19-final-v03.txt" "中国_report-2026-11-19-final-v03.txt" "中国_report-2026-11-19-final-v04.txt")
+                        ((japanese) "report-nihon.txt" "report-日本.txt" "report-米国.txt")
+                        ((japanese) "report_nihon.txt" "report_日本.txt" "report-日本.txt")
+                        ((japanese) "kan'i_kaigi.txt" "簡易_会議.txt" "簡易/会議.txt")
+                        ((chinese) "report-zhongguo.txt" "report-中国.txt" "report-美国.txt")
+                        ((chinese) "report_zhongguo.txt" "report_中国.txt" "report-中国.txt")
+                        ((korean) "report-감사.txt" "report-감사.txt" "report-강사.txt")
+                        ((korean) "report_감사.txt" "report_감사.txt" "report-감사.txt")))
+          (let ((nucleo-completion-languages (car case)))
+            (should (equal (nucleo-completion-tests--plain
+                            (nucleo-completion-all-completions (cadr case) (cddr case)))
+                           (list (nth 2 case))))))
+        (let ((nucleo-completion-languages '(japanese)))
+          (should (equal (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "nihon_kaigi.txt"
+                           '("日本_会議.txt.bak" "日本_会議人.txt" "日本_会議.txt")))
+                         '("日本_会議.txt" "日本_会議人.txt" "日本_会議.txt.bak")))
+          (should (member "日本_kaigi.txt"
+                          (nucleo-completion-tests--plain
+                           (nucleo-completion-all-completions
+                            "nihon_kaigi.txt" '("日本_kaigi.txt"))))))))
+    (dolist (case '(((japanese) "report-nihon.txt" "😀report-日本.txt")
+                    ((chinese) "report-zhongguo.txt" "😀report-中国.txt")
+                    ((korean) "report-감사.txt" "😀report-감사.txt")
+                    ((japanese) "nihon_kaigi.txt" "😀日本_会議.txt")))
+      (let* ((nucleo-completion-languages (car case))
+             (highlighted (nucleo-completion-highlight (cadr case) (copy-sequence (nth 2 case)))))
+        (should-not (get-text-property 0 'face highlighted))
+        (cl-loop for index from 1 below (length highlighted)
+                 do (should (get-text-property index 'face highlighted)))))
+    (dolist (case '((nucleo-completion-migemo-regexp "report-nihon.txt" "report-日本.txt")
+                    (nucleo-completion-migemo-regexp "kan'i_kaigi.txt" "簡易_会議.txt")
+                    (nucleo-completion-pinyin-regexp "report-zhongguo.txt" "report-中国.txt")
+                    (nucleo-completion-hangul-regexp "report-감사.txt" "report-감사.txt")))
+      (should (string-match-p (funcall (car case) (cadr case)) (nth 2 case))))))
+
+(ert-deftest nucleo-completion-native-language-filename-length-limits-test ()
+  "Allow long filename affixes without lifting the reading length limit."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)
+                    (fboundp 'nucleo-completion-migemo-matcher)))
+  (let ((nucleo-completion-regexp-functions nil)
+        (nucleo-completion-migemo-dictionary-files nil))
+    (dolist (case '(((japanese) "nihon" "日本")
+                    ((chinese) "zhongguo" "中国")))
+      (let* ((nucleo-completion-languages (car case))
+             (reading (cadr case))
+             (suffix (concat "_" (make-string (- 255 (length reading) 5) ?x) ".txt"))
+             (query (concat reading suffix))
+             (candidate (concat (nth 2 case) suffix)))
+        (should (= (length query) 255))
+        (dolist (threshold '(1 100))
+          (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+            (should (member candidate (nucleo-completion-tests--plain
+                                       (nucleo-completion-all-completions query (list candidate)))))))))
+    (should-not (nucleo-completion-migemo-matcher
+                 (apply #'concat (make-list 7 "nihon")) nil))
+    (should-not (nucleo-completion-language-matcher
+                 'chinese (apply #'concat (make-list 5 "yinhang"))))
+    (should-not (nucleo-completion-migemo-matcher
+                 (concat "nihon_" (make-string 250 ?x)) nil))
+    (should-not (nucleo-completion-language-matcher
+                 'chinese (concat "zhongguo_" (make-string 247 ?x))))))
+
 (ert-deftest nucleo-completion-native-language-input-normalization-test ()
   "Accept fullwidth reading input and keep candidate names and offsets."
   (skip-unless (and (nucleo-completion--module-ready-p)
@@ -2696,6 +2869,47 @@ The stub returns TRIPLES wrapped as a module-result bundle."
     (dolist (case '((nucleo-completion-migemo-regexp "ｋｅｉｊｉ" "軽自")
                     (nucleo-completion-pinyin-regexp "xi’an" "西安")
                     (nucleo-completion-hangul-regexp "ㄱㅅ．ｔｘｔ" "감사.txt")))
+      (let ((regexp (funcall (car case) (cadr case))))
+        (should (string-match-p regexp (nth 2 case)))))))
+
+(ert-deftest nucleo-completion-native-language-filename-width-test ()
+  "Match wide filename affixes while keeping the original candidate text."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-migemo-matcher)
+                    (fboundp 'nucleo-completion-language-matcher)))
+  (let ((nucleo-completion-regexp-functions nil)
+        (nucleo-completion-migemo-dictionary-files nil)
+        (completion-ignore-case nil))
+    (dolist (threshold '(1 100))
+      (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+        (dolist (case '(((japanese) "nihon-report.txt" "日本－ｒｅｐｏｒｔ．ｔｘｔ" "日本－ｒｅｐｏｒｔ．ｏｒｇ")
+                        ((japanese) "kaigi2026" "会議２０２６.txt" "会議２０２５.txt")
+                        ((japanese) "2026-kaigi" "２０２６－会議.txt" "２０２５－会議.txt")
+                        ((chinese) "zhongguo.txt" "中国．ｔｘｔ" "中国．ｏｒｇ")
+                        ((chinese) "2026-zhongguo.txt" "２０２６－中国．ｔｘｔ" "２０２５－中国．ｔｘｔ")
+                        ((korean) "ㄱㅅ_report.txt" "감사＿ｒｅｐｏｒｔ．ｔｘｔ" "감사＿ｒｅｐｏｒｔ．ｏｒｇ")
+                        ((korean) "ㄱㅅ2026" "감사２０２６.txt" "감사２０２５.txt")))
+          (let ((nucleo-completion-languages (car case)))
+            (should (equal (nucleo-completion-tests--plain
+                            (nucleo-completion-all-completions (cadr case) (cddr case)))
+                           (list (nth 2 case))))))
+        (let ((nucleo-completion-languages '(japanese))
+              (candidate "日本－ＲＥＰＯＲＴ．ＴＸＴ"))
+          (should-not (nucleo-completion-all-completions "nihon-report.txt" (list candidate)))
+          (let ((completion-ignore-case t))
+            (should (equal (nucleo-completion-tests--plain
+                            (nucleo-completion-all-completions "nihon-report.txt" (list candidate)))
+                           (list candidate)))))))
+    (let* ((nucleo-completion-languages '(korean))
+           (candidate "😀감사．ｔｘｔ")
+           (highlighted (nucleo-completion-highlight "감사.txt" (copy-sequence candidate))))
+      (should (equal (substring-no-properties highlighted) candidate))
+      (should-not (get-text-property 0 'face highlighted))
+      (cl-loop for index from 1 below (length highlighted)
+               do (should (get-text-property index 'face highlighted))))
+    (dolist (case '((nucleo-completion-migemo-regexp "nihon-report.txt" "日本－ｒｅｐｏｒｔ．ｔｘｔ")
+                    (nucleo-completion-pinyin-regexp "2026-zhongguo.txt" "２０２６－中国．ｔｘｔ")
+                    (nucleo-completion-hangul-regexp "ㄱㅅ_report.txt" "감사＿ｒｅｐｏｒｔ．ｔｘｔ")))
       (let ((regexp (funcall (car case) (cadr case))))
         (should (string-match-p regexp (nth 2 case)))))))
 
@@ -2738,6 +2952,37 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (should-not (string-match-p regexp "강사.txt"))))
     (should-not (nucleo-completion-language-matcher 'korean "ascii"))))
 
+(ert-deftest nucleo-completion-native-korean-single-syllable-normalization-test ()
+  "Allow canonical matching for a complete syllable at the default floor."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)))
+  (let ((nucleo-completion-languages '(korean))
+        (nucleo-completion-regexp-minimum-term-length 2)
+        (nucleo-completion-regexp-functions nil))
+    (dolist (threshold '(1 100))
+      (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+        (should (equal (nucleo-completion-tests--plain
+                        (nucleo-completion-all-completions
+                         "감" '("감.txt" "강.txt")))
+                       '("감.txt")))
+        (should (equal (nucleo-completion-tests--plain
+                        (nucleo-completion-all-completions "감" '("감.txt" "강.txt")))
+                       '("감.txt")))
+        (should-not (nucleo-completion-all-completions "ㄱ" '("감.txt")))))
+    (let ((nucleo-completion-regexp-minimum-term-length 3))
+      (should-not (nucleo-completion-all-completions "감" '("감.txt"))))
+    (let* ((custom-calls 0)
+           (nucleo-completion-regexp-functions
+            (list (lambda (_query) (cl-incf custom-calls) "강")))
+           (candidate "😀감.txt")
+           (highlighted (nucleo-completion-highlight "감" (copy-sequence candidate))))
+      (should (equal (substring-no-properties highlighted) candidate))
+      (should-not (get-text-property 0 'face highlighted))
+      (dolist (index '(1 2 3))
+        (should (get-text-property index 'face highlighted)))
+      (should-not (get-text-property 4 'face highlighted))
+      (should (= custom-calls 0)))))
+
 (ert-deftest nucleo-completion-native-language-real-file-completion-test ()
   "Expand attached affixes through the Emacs file completion table."
   (skip-unless (and (nucleo-completion--module-ready-p)
@@ -2746,11 +2991,20 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (nucleo-completion-regexp-functions nil))
     (unwind-protect
         (let ((default-directory (file-name-as-directory directory)))
-          (dolist (name '("日本-report.txt" "中国.txt" "감사.txt"))
+          (dolist (name '("日本-report.txt" "中国.txt" "감사.txt"
+                          "日本_report-2026-11-19-final-v03.txt" "report-中国.txt"
+                          "日本_会議.txt" "中国_会议.txt" "감사_회의.txt"
+                          "감사_회의.txt"))
             (with-temp-file name))
           (dolist (case '(((japanese) "nihon-report" "日本-report.txt")
+                          ((japanese) "nihon_report-2026-11-19-final-v03.txt" "日本_report-2026-11-19-final-v03.txt")
+                          ((japanese) "nihon_kaigi.txt" "日本_会議.txt")
+                          ((chinese) "report-zhongguo.txt" "report-中国.txt")
                           ((japanese) "nihon－report．ｔｘｔ" "日本-report.txt")
                           ((chinese) "zhongguo.txt" "中国.txt")
+                          ((chinese) "zhongguo_huiyi.txt" "中国_会议.txt")
+                          ((korean) "ㄱㅅ_ㅎㅇ.txt" "감사_회의.txt")
+                          ((korean) "ㄱㅅ_ㅎㅇ.txt" "감사_회의.txt")
                           ((korean) "ㄱㅅ.txt" "감사.txt")
                           ((korean) "감사.txt" "감사.txt")))
             (let* ((nucleo-completion-languages (car case))
@@ -2762,6 +3016,49 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                                    collect (substring-no-properties (car tail)))))
               (should (member (nth 2 case) names)))))
       (delete-directory directory t))))
+
+(ert-deftest nucleo-completion-native-language-opens-original-wide-file-name-test ()
+  "Keep the on-disk file name when completing narrow input."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-migemo-matcher)))
+  (let ((directory (make-temp-file "nucleo-wide-file-" t))
+        (nucleo-completion-languages '(japanese))
+        (nucleo-completion-regexp-functions nil)
+        (nucleo-completion-migemo-dictionary-files nil)
+        (query "nihon-report.txt")
+        (name "日本－ｒｅｐｏｒｔ．ｔｘｔ"))
+    (unwind-protect
+        (let ((default-directory (file-name-as-directory directory)))
+          (with-temp-file name (insert "original file"))
+          (let ((completion (nucleo-completion-try-completion
+                             query #'read-file-name-internal nil (length query))))
+            (should (equal (car completion) name))
+            (with-temp-buffer
+              (insert-file-contents (car completion))
+              (should (equal (buffer-string) "original file")))))
+      (delete-directory directory t))))
+
+(ert-deftest nucleo-completion-native-pinyin-literal-number-order-test ()
+  "Prefer written numerals within the existing extension tiers."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)
+                    (fboundp 'nucleo-completion-filename-match-priority)))
+  (let ((nucleo-completion-languages '(chinese))
+        (nucleo-completion-regexp-functions nil)
+        (candidates '("中国2.txt.bak" "中国人.txt" "中国.txt" "中国2.txt"))
+        (ordered '("中国2.txt" "中国.txt" "中国人.txt" "中国2.txt.bak")))
+    (dolist (threshold '(1 100))
+      (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+        (should (equal (nucleo-completion-tests--plain
+                        (nucleo-completion-all-completions "zhongguo2.txt" candidates))
+                       ordered))
+        (should (equal (nucleo-completion-tests--plain
+                        (nucleo-completion-all-completions
+                         "zhongguo2.txt" '("中国.txt" "中国２．ｔｘｔ")))
+                       '("中国２．ｔｘｔ" "中国.txt")))
+        (should (equal (nucleo-completion-tests--plain
+                        (nucleo-completion-all-completions "zhongguo2" '("中国" "中国2")))
+                       '("中国" "中国2")))))))
 
 (ert-deftest nucleo-completion-native-pinyin-tones-and-literal-numerals-test ()
   "Tone constraints coexist with literal numbers in filenames."

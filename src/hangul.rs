@@ -2,6 +2,7 @@
 
 use std::str::Chars;
 
+use crate::filename;
 use crate::languages::MAX_TERM_CHARACTERS;
 
 // Unicode orders modern syllables by initial, then 21 vowels and 28 finals.
@@ -117,7 +118,12 @@ impl HangulMatcher {
                         ));
                     }
                 }
-                QueryPart::Ascii(character) => result.push(character),
+                QueryPart::Ascii(character) => {
+                    filename::append_literal_regexp(
+                        &mut result,
+                        character.encode_utf8(&mut [0; 4]),
+                    );
+                }
             }
         }
         result
@@ -158,7 +164,7 @@ impl HangulMatcher {
                     (actual == expected).then_some(length)
                 }
                 QueryPart::Ascii(expected) => {
-                    let actual = chars.clone().next()?;
+                    let actual = filename::fold_width(chars.clone().next()?);
                     (actual == expected || (ignore_case && actual.eq_ignore_ascii_case(&expected)))
                         .then_some(1)
                 }
@@ -216,6 +222,14 @@ mod tests {
             assert_eq!(matcher.find("감사", 1, false), None);
             assert_eq!(matcher.find("가사", 0, false), None);
         }
+    }
+
+    #[test]
+    fn mixed_ascii_matches_fullwidth_characters() {
+        let matcher = HangulMatcher::new("ㄱAb2").unwrap();
+        assert_eq!(matcher.find("😀가Ａｂ２", 0, false), Some((1, 5)));
+        assert_eq!(matcher.find("가ａｂ２", 0, false), None);
+        assert_eq!(matcher.find("가ａｂ２", 0, true), Some((0, 4)));
     }
 
     #[test]
