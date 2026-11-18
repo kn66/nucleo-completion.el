@@ -2255,8 +2255,14 @@ The stub returns TRIPLES wrapped as a module-result bundle."
 
 (ert-deftest nucleo-completion-language-expander-selection-test ()
   (let ((nucleo-completion-languages '(japanese korean))
-        (nucleo-completion-regexp-functions (list (lambda (_) "custom"))))
-    (cl-letf (((symbol-function 'nucleo-completion-migemo-regexp)
+        (nucleo-completion-regexp-functions (list (lambda (_) "custom")))
+        (original-fboundp (symbol-function 'fboundp)))
+    (cl-letf (((symbol-function 'fboundp)
+               (lambda (function)
+                 (unless (memq function '(nucleo-completion-language-matcher
+                                         nucleo-completion-migemo-matcher))
+                   (funcall original-fboundp function))))
+              ((symbol-function 'nucleo-completion-migemo-regexp)
                (lambda (_) "日本"))
               ((symbol-function 'nucleo-completion-pinyin-regexp)
                (lambda (_) "中国"))
@@ -2275,7 +2281,9 @@ The stub returns TRIPLES wrapped as a module-result bundle."
         (original-fboundp (symbol-function 'fboundp)))
     (cl-letf (((symbol-function 'fboundp)
                (lambda (function)
-                 (unless (memq function '(nucleo-completion-migemo-regexp
+                 (unless (memq function '(nucleo-completion-language-matcher
+                                          nucleo-completion-migemo-matcher
+                                          nucleo-completion-migemo-regexp
                                           nucleo-completion-pinyin-regexp
                                           nucleo-completion-hangul-regexp))
                    (funcall original-fboundp function)))))
@@ -2322,9 +2330,10 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                (lambda (_) "中国"))
               ((symbol-function 'fboundp)
                (lambda (function)
-                 (if (eq function 'nucleo-completion-migemo-regexp)
-                     available
-                   (funcall original-fboundp function)))))
+                 (cond ((memq function '(nucleo-completion-language-matcher
+                                              nucleo-completion-migemo-matcher)) nil)
+                       ((eq function 'nucleo-completion-migemo-regexp) available)
+                       (t (funcall original-fboundp function))))))
       (nucleo-completion--with-completion-pass-caches
         (let ((context (nucleo-completion-tests--context table)))
           (should-not (nucleo-completion--regexp-function-regexps "abc"))
@@ -2344,8 +2353,13 @@ The stub returns TRIPLES wrapped as a module-result bundle."
   (let ((nucleo-completion-languages '(japanese))
         (nucleo-completion-regexp-functions
          (list (lambda (term) (when (equal term "go") "語"))))
-        (completion-ignore-case nil))
-    (cl-letf (((symbol-function 'nucleo-completion-migemo-regexp)
+        (completion-ignore-case nil)
+        (original-fboundp (symbol-function 'fboundp)))
+    (cl-letf (((symbol-function 'fboundp)
+               (lambda (function)
+                 (unless (eq function 'nucleo-completion-migemo-matcher)
+                   (funcall original-fboundp function))))
+              ((symbol-function 'nucleo-completion-migemo-regexp)
                (lambda (term) (when (equal term "nihon") "日本"))))
       (should (equal (nucleo-completion-tests--plain
                       (nucleo-completion-all-completions
@@ -2394,6 +2408,127 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                       (nucleo-completion-all-completions
                        (nth 0 case) (list (nth 1 case) (nth 2 case))))
                      (list (nth 1 case)))))))
+
+(ert-deftest nucleo-completion-native-language-direct-matching-test ()
+  "Match ambiguous pinyin and decomposed Hangul through completion APIs."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)))
+  (let ((nucleo-completion-regexp-functions nil)
+        (nucleo-completion--native-regexp-minimum-candidates 1))
+    (let ((nucleo-completion-languages '(chinese)))
+      (dolist (candidate '("银行" "銀行" "银行银行银行银行"))
+        (let ((query (if (> (length candidate) 2)
+                         "yinhangyinhangyinhangyinhang"
+                       "yinhang")))
+          (should (member candidate
+                          (nucleo-completion-tests--plain
+                           (nucleo-completion-all-completions
+                            query (list candidate "无关")))))
+          (should (equal (nucleo-completion-try-completion
+                          query (list candidate) nil (length query))
+                         (cons candidate (length candidate))))
+          (let ((highlighted (nucleo-completion-highlight
+                              query (copy-sequence candidate))))
+            (dotimes (i (length candidate))
+              (should (get-text-property i 'face highlighted)))))))
+    (let ((nucleo-completion-languages '(korean))
+          (candidate "😀감사.txt"))
+      (dolist (completion-ignore-case '(nil t))
+        (should (member candidate
+                        (nucleo-completion-tests--plain
+                         (nucleo-completion-all-completions
+                          "ㄱㅅ txt" (list candidate "😀나무.txt")))))
+        (let ((highlighted (nucleo-completion-highlight
+                            "ㄱㅅ txt" (copy-sequence candidate))))
+          (should-not (get-text-property 0 'face highlighted))
+          (dolist (i '(1 2 3 4 5 7 8 9))
+            (should (get-text-property i 'face highlighted))))))))
+
+(ert-deftest nucleo-completion-native-japanese-direct-matching-test ()
+  "Match Japanese words, incomplete readings and romaji punctuation."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)
+                    (fboundp 'nucleo-completion-migemo-matcher)))
+  (let ((nucleo-completion-languages '(japanese))
+        (nucleo-completion-regexp-functions nil)
+        (nucleo-completion-migemo-dictionary-files nil)
+        (nucleo-completion--native-regexp-minimum-candidates 1))
+    (dolist (case '(("keiji" "軽自") ("keiji" "軽自動車")
+                    ("pa-to" "パート") ("ko-hi-" "コーヒー")
+                    ("kan'i" "簡易") ("toiawase" "問い合わせ")
+                    ("moushiko" "申し込み")))
+      (let* ((query (car case))
+             (candidate (cadr case))
+             (results (nucleo-completion-tests--plain
+                       (nucleo-completion-all-completions
+                        query (list candidate "無関係")))))
+        (should (member candidate results))
+        (should-not (member "無関係" results))
+        (should (get-text-property
+                 0 'face (nucleo-completion-highlight
+                          query (copy-sequence candidate))))))))
+
+(ert-deftest nucleo-completion-native-japanese-local-dictionary-test ()
+  "Import local entries, reload a changed file, and tolerate missing files."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)
+                    (fboundp 'nucleo-completion-migemo-matcher)
+                    (fboundp 'nucleo-completion-migemo-load-dictionary)))
+  (let* ((file (make-temp-file "nucleo-migemo-"))
+         (nucleo-completion-languages '(japanese))
+         (nucleo-completion-regexp-functions nil)
+         (nucleo-completion-migemo-dictionary-files (list file))
+         (nucleo-completion--migemo-dictionary-cache nil)
+         (nucleo-completion--native-regexp-minimum-candidates 1))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "けんさく\t独自辞書語\n"))
+          (let ((results (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "kensaku" '("独自辞書語" "検索" "kensaku" "無関係")))))
+            (dolist (candidate '("独自辞書語" "検索" "kensaku"))
+              (should (member candidate results)))
+            (should-not (member "無関係" results)))
+          (let ((highlighted (nucleo-completion-highlight
+                              "kensaku" (copy-sequence "独自辞書語"))))
+            (dotimes (i (length highlighted))
+              (should (get-text-property i 'face highlighted))))
+          ;; A different size also makes this reliable on coarse timestamp filesystems.
+          (with-temp-file file (insert "けんさく\t更新した辞書候補\n"))
+          (let ((results (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "kensaku" '("独自辞書語" "更新した辞書候補")))))
+            (should (member "更新した辞書候補" results))
+            (should-not (member "独自辞書語" results)))
+          (delete-file file)
+          (cl-letf (((symbol-function 'display-warning) #'ignore))
+            (should (member "検索" (nucleo-completion-tests--plain
+                                   (nucleo-completion-all-completions
+                                    "kensaku" '("検索" "無関係")))))))
+      (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest nucleo-completion-native-language-non-unicode-offsets-test ()
+  "Keep non-Unicode candidate boundaries and lazy highlight offsets."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-language-matcher)))
+  (let* ((nucleo-completion-languages '(chinese))
+         (nucleo-completion-regexp-functions nil)
+         (completion-lazy-hilit t)
+         (completion-lazy-hilit-fn nil)
+         (tofu (string #x200001))
+         (candidate (concat tofu "銀行" tofu "銀行" tofu))
+         (interrupted-word (concat "銀" tofu "行")))
+    (should (equal (nucleo-completion-tests--plain
+                    (nucleo-completion-all-completions
+                     "yinhang" (list candidate interrupted-word)))
+                   (list candidate)))
+    (garbage-collect)
+    (let ((highlighted (funcall completion-lazy-hilit-fn
+                                (copy-sequence candidate))))
+      (dolist (i '(1 2 4 5))
+        (should (get-text-property i 'face highlighted)))
+      (dolist (i '(0 3 6))
+        (should-not (get-text-property i 'face highlighted))))))
 
 (ert-deftest nucleo-completion-native-language-lazy-priority-test ()
   (skip-unless (and (fboundp 'nucleo-completion-migemo-regexp)

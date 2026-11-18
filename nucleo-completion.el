@@ -4,7 +4,7 @@
 
 ;; Author: Nobu <https://github.com/kn66>
 ;; Assisted-by: OpenAI Codex:gpt-5
-;; Version: 0.1.17
+;; Version: 0.1.18
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: matching, convenience
 ;; URL: https://github.com/kn66/nucleo-completion.el
@@ -52,10 +52,19 @@
                   "ext:nucleo-completion-module")
 (declare-function nucleo-completion-migemo-regexp
                   "ext:nucleo-completion-module" (term))
+(declare-function nucleo-completion-migemo-load-dictionary
+                  "ext:nucleo-completion-module" (path))
+(declare-function nucleo-completion-migemo-matcher
+                  "ext:nucleo-completion-module" (term dictionaries))
 (declare-function nucleo-completion-pinyin-regexp
                   "ext:nucleo-completion-module" (term))
 (declare-function nucleo-completion-hangul-regexp
                   "ext:nucleo-completion-module" (term))
+(declare-function nucleo-completion-language-matcher
+                  "ext:nucleo-completion-module" (language term))
+(declare-function nucleo-completion-language-match
+                  "ext:nucleo-completion-module"
+                  (matcher text start ignore-case))
 (declare-function mm-destroy-parts "mm-decode")
 (declare-function mm-dissect-buffer "mm-decode")
 (declare-function mm-save-part-to-file "mm-decode")
@@ -84,7 +93,7 @@ Large values can decrease performance."
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-languages '(japanese)
-  "Languages to expand into additional completion regexps.
+  "Languages to use for additional completion matches.
 Japanese uses the bundled Migemo dictionary; Chinese uses pinyin,
 and Korean uses Hangul initial consonants.  Expansions are available
 when the loaded module provides the corresponding functions.  They
@@ -104,6 +113,15 @@ The built-in fuzzy subsequence matcher is always used.  Regexps
 from this option are ORed with it for each term, while terms are
 ANDed together."
   :type '(repeat function)
+  :group 'nucleo-completion)
+
+(defcustom nucleo-completion-migemo-dictionary-files nil
+  "Additional local UTF-8 Migemo text dictionaries for Japanese completion.
+Use C/Migemo format, with a reading and one or more tab-separated
+spellings per line.  Relative paths are resolved from
+`user-emacs-directory'.  A supported Rust module imports these
+files on demand and searches them alongside the bundled dictionaries."
+  :type '(repeat file)
   :group 'nucleo-completion)
 
 (defcustom nucleo-completion-report-regexp-function-errors nil
@@ -239,7 +257,7 @@ Load failures are always saved in
   :type 'string
   :group 'nucleo-completion)
 
-(defconst nucleo-completion-required-module-version "0.1.17"
+(defconst nucleo-completion-required-module-version "0.1.18"
   "Version of the prebuilt Rust module expected by this package.")
 
 (defcustom nucleo-completion-module-release-tag nil
@@ -320,6 +338,9 @@ Each entry has the form (FILE . MESSAGE).")
 (defvar nucleo-completion--regexp-cache nil
   "Cache for regexp expander results during one completion pass.")
 
+(defvar nucleo-completion--migemo-dictionary-cache nil
+  "File fingerprints and imported dictionaries from the last Migemo lookup.")
+
 (defvar nucleo-completion--terms-cache nil
   "Cache for split search terms during one completion pass.")
 
@@ -365,15 +386,82 @@ When CACHE is not a hash table, call PRODUCER without caching."
             value)))
     (funcall producer)))
 
+(defun nucleo-completion--load-migemo-dictionaries ()
+  "Return imported Migemo dictionaries for the currently configured files."
+  (let* ((files (delete-dups
+                 (mapcar (lambda (file)
+                           (expand-file-name file user-emacs-directory))
+                         nucleo-completion-migemo-dictionary-files)))
+         (fingerprints
+          (cl-loop for file in files
+                   for remote = (file-remote-p file)
+                   for attributes = (and (not remote)
+                                         (ignore-errors (file-attributes file)))
+                   collect (list file remote
+                                 (file-attribute-modification-time attributes)
+                                 (file-attribute-status-change-time attributes)
+                                 (file-attribute-size attributes)
+                                 (file-attribute-inode-number attributes)))))
+    (unless (equal fingerprints (car nucleo-completion--migemo-dictionary-cache))
+      (setq nucleo-completion--migemo-dictionary-cache
+            (cons fingerprints
+                  (cl-loop for (file remote) in fingerprints
+                           for dictionary =
+                           (condition-case err
+                               (progn
+                                 (when remote (error "A local file is required"))
+                                 (nucleo-completion-migemo-load-dictionary file))
+                             (error
+                              (display-warning
+                               'nucleo-completion
+                               (format "Migemo dictionary %s: %s"
+                                       file (error-message-string err))
+                               :warning)
+                              nil))
+                           when dictionary collect dictionary))))
+    (cdr nucleo-completion--migemo-dictionary-cache)))
+
+(defun nucleo-completion--migemo-dictionaries ()
+  "Return the additional dictionaries for the current completion pass."
+  (when (and nucleo-completion-migemo-dictionary-files
+             (memq 'japanese nucleo-completion-languages)
+             (fboundp 'nucleo-completion-migemo-load-dictionary)
+             (fboundp 'nucleo-completion-migemo-matcher))
+    (nucleo-completion--cached nucleo-completion--regexp-cache
+                              'migemo-dictionaries
+                              #'nucleo-completion--load-migemo-dictionaries)))
+
+(defun nucleo-completion--migemo-matcher (term)
+  "Compile a Migemo matcher for TERM."
+  (nucleo-completion-migemo-matcher term (nucleo-completion--migemo-dictionaries)))
+
+(defun nucleo-completion--pinyin-matcher (term)
+  "Compile a pinyin matcher for TERM."
+  (nucleo-completion-language-matcher 'chinese term))
+
+(defun nucleo-completion--hangul-matcher (term)
+  "Compile a Hangul initial matcher for TERM."
+  (nucleo-completion-language-matcher 'korean term))
+
 (defun nucleo-completion--regexp-expanders ()
-  "Return configured and available language regexp expanders.
+  "Return configured regexp expanders and available language expanders.
 Older modules may not provide the language functions; do not load a
 module here because the normal completion path handles module loading."
   (append nucleo-completion-regexp-functions
-          (cl-loop for (language . function) in
-                   '((japanese . nucleo-completion-migemo-regexp)
-                     (chinese . nucleo-completion-pinyin-regexp)
-                     (korean . nucleo-completion-hangul-regexp))
+          (cl-loop with direct = (and (fboundp 'nucleo-completion-language-matcher)
+                                      (fboundp 'nucleo-completion-language-match))
+                   for (language regexp matcher) in
+                   '((japanese nucleo-completion-migemo-regexp
+                               nucleo-completion--migemo-matcher)
+                     (chinese nucleo-completion-pinyin-regexp
+                              nucleo-completion--pinyin-matcher)
+                     (korean nucleo-completion-hangul-regexp
+                             nucleo-completion--hangul-matcher))
+                   for function = (or (and direct
+                                           (or (not (eq language 'japanese))
+                                               (fboundp 'nucleo-completion-migemo-matcher))
+                                           matcher)
+                                      regexp)
                    when (and (memq language nucleo-completion-languages)
                              (fboundp function))
                    collect function)))
@@ -881,7 +969,7 @@ Old binaries remain because another Emacs process may still use them."
        nil))))
 
 (defun nucleo-completion--regexp-function-regexps (term)
-  "Return extra regexps produced for TERM."
+  "Return regexp and native language alternatives for TERM."
   (let ((case-fold-search completion-ignore-case))
     (nucleo-completion--cached
      nucleo-completion--regexp-cache
@@ -892,12 +980,17 @@ Old binaries remain because another Emacs process may still use them."
      (lambda () (nucleo-completion--regexp-function-regexps-uncached term)))))
 
 (defun nucleo-completion--regexp-function-regexps-uncached (term)
-  "Return uncached extra regexps produced for TERM."
+  "Return uncached regexp and native language alternatives for TERM."
   (when (>= (length term) (nucleo-completion--regexp-minimum-term-length))
     (cl-loop for function in (nucleo-completion--regexp-expanders)
              for value = (nucleo-completion--regexp-function-value
                           function term)
              append (cond
+                     ((and (memq function '(nucleo-completion--migemo-matcher
+                                            nucleo-completion--pinyin-matcher
+                                            nucleo-completion--hangul-matcher))
+                           (user-ptrp value))
+                      (list value))
                      ((nucleo-completion--valid-regexp-p value)
                       (list value))
                      ((listp value)
@@ -909,30 +1002,30 @@ Old binaries remain because another Emacs process may still use them."
   (concat "\\`" (nucleo-completion--subsequence-regexp term)))
 
 (defun nucleo-completion--term-regexps (term)
-  "Return regexps that may match TERM."
+  "Return match alternatives for TERM, including its fuzzy regexp."
   (let ((fuzzy (nucleo-completion--term-fuzzy-regexp term)))
     (if (nucleo-completion--regexp-expanders)
         (cons fuzzy (nucleo-completion--regexp-function-regexps term))
       (list fuzzy))))
 
 (defun nucleo-completion--term-regexp-groups (needle)
-  "Return regexp groups for NEEDLE.
+  "Return match groups for NEEDLE.
 Each group corresponds to one term.  A candidate must match at
-least one regexp from every group."
+least one alternative from every group."
   (mapcar (lambda (term)
             (nucleo-completion--term-regexps term))
           (nucleo-completion--terms needle)))
 
 (defun nucleo-completion--expanded-regexp-p (needle)
-  "Return non-nil if NEEDLE has extra regexps from configured functions."
+  "Return non-nil if NEEDLE has extra matchers from configured functions."
   (and (nucleo-completion--regexp-expanders)
        (cl-some #'nucleo-completion--regexp-function-regexps
                 (nucleo-completion--terms needle))))
 
 (defun nucleo-completion--regexp-only-term-regexps (term)
-  "Return regexps for TERM in the module regexp-only pass.
+  "Return matchers for TERM in the module regexp-only pass.
 When TERM has configured regexp expansions, return only those
-regexps because the Rust module has already handled fuzzy matching.
+alternatives because the Rust module has already handled fuzzy matching.
 Terms without configured expansions still use the fuzzy matcher so
 they can combine with expanded terms."
   (or (nucleo-completion--regexp-function-regexps term)
@@ -951,8 +1044,11 @@ they can combine with expanded terms."
       (let ((regexps (car groups))
             group-matched)
         (while (and (not group-matched) regexps)
-          (when (string-match-p (car regexps) candidate)
-            (setq group-matched t))
+          (let ((matcher (car regexps)))
+            (when (if (stringp matcher)
+                      (string-match-p matcher candidate)
+                    (nucleo-completion--language-match matcher candidate 0))
+              (setq group-matched t)))
           (setq regexps (cdr regexps)))
         (setq matched group-matched
               groups (cdr groups))))
@@ -1367,6 +1463,23 @@ translated."
   "Return non-nil when ERR is the module string encoder rejecting input."
   (and (eq (car-safe err) 'wrong-type-argument)
        (eq (cadr err) 'unicode-string-p)))
+
+(defun nucleo-completion--language-match (matcher candidate start)
+  "Find MATCHER's next match in CANDIDATE at or after character START."
+  (condition-case err
+      (nucleo-completion-language-match matcher candidate start case-fold-search)
+    (wrong-type-argument
+     (unless (nucleo-completion--module-unicode-error-p err)
+       (signal (car err) (cdr err)))
+     ;; Preserve the original offsets and boundaries when a frontend embeds
+     ;; non-Unicode characters that the module cannot read.
+     (let* ((max nucleo-completion--max-unicode-codepoint)
+            (text (apply #'string
+                         (cl-loop for ch across candidate
+                                  collect (if (or (> ch max) (<= #xd800 ch #xdfff))
+                                              #xfffd
+                                            ch)))))
+       (nucleo-completion-language-match matcher text start case-fold-search)))))
 
 (defun nucleo-completion--module-results-with-scrub
     (needle candidates ignore-case highlight-limit return-all-scores
@@ -1921,6 +2034,15 @@ SCORE is compared to MAX-SCORE."
               (setq start end))
           (setq start (1+ (or start 0))))))))
 
+(defun nucleo-completion--highlight-language (matcher haystack)
+  "Highlight MATCHER's matches in HAYSTACK."
+  (let ((start 0)
+        match)
+    (while (setq match (nucleo-completion--language-match matcher haystack start))
+      (setq start (cdr match))
+      (add-face-text-property (car match) start
+                              'completions-common-part nil haystack))))
+
 (defun nucleo-completion-highlight (needle haystack &optional indices)
   "Highlight destructively the NEEDLE matches in HAYSTACK.
 When INDICES is non-nil, highlight those precomputed match
@@ -1946,8 +2068,10 @@ positions instead of recomputing a subsequence match."
                    (setq start (1+ match))))))
     (when (nucleo-completion--regexp-expanders)
       (dolist (term terms)
-        (dolist (regexp (nucleo-completion--regexp-function-regexps term))
-          (nucleo-completion--highlight-regexp regexp haystack)))))
+        (dolist (matcher (nucleo-completion--regexp-function-regexps term))
+          (if (stringp matcher)
+              (nucleo-completion--highlight-regexp matcher haystack)
+            (nucleo-completion--highlight-language matcher haystack))))))
   haystack)
 
 (defun nucleo-completion--highlight-candidate
@@ -1967,7 +2091,9 @@ another filtering path already handles regexp expansion."
       completion-regexp-list
     (append
      (if (nucleo-completion--regexp-expanders)
-         (apply #'append (nucleo-completion--term-regexp-groups needle))
+         (cl-remove-if-not #'stringp
+                           (apply #'append
+                                  (nucleo-completion--term-regexp-groups needle)))
        (mapcar #'nucleo-completion--term-fuzzy-regexp
                (nucleo-completion--terms needle)))
      completion-regexp-list)))
@@ -2377,7 +2503,7 @@ The return value has the shape (ALL BUNDLE TOP-INFO FULL-SCORES)."
   "Source and filtering settings for an interrupt-reusable result."
   table predicate regexp-list ignore-case regexp-functions languages expanders
   regexp-minimum-term-length sort-history sort-length sort-alphabetically
-  regexp-priority)
+  regexp-priority migemo-dictionaries)
 
 (defun nucleo-completion--completion-context (table pred regexp-list)
   "Return the completion context for an interrupt-reusable result.
@@ -2394,6 +2520,7 @@ available or how the reusable snapshot is ordered."
                        nucleo-completion-regexp-functions)
    :languages (copy-sequence nucleo-completion-languages)
    :expanders (nucleo-completion--regexp-expanders)
+   :migemo-dictionaries (nucleo-completion--migemo-dictionaries)
    :regexp-minimum-term-length (nucleo-completion--regexp-minimum-term-length)
    :sort-history nucleo-completion-sort-ties-by-history
    :sort-length nucleo-completion-sort-ties-by-length
@@ -2417,6 +2544,8 @@ candidates from a different completion source."
               nucleo-completion-languages)
        (equal (nucleo-completion--context-expanders context)
               (nucleo-completion--regexp-expanders))
+       (equal (nucleo-completion--context-migemo-dictionaries context)
+              (nucleo-completion--migemo-dictionaries))
        (equal (nucleo-completion--context-regexp-minimum-term-length context)
               (nucleo-completion--regexp-minimum-term-length))
        (eq (nucleo-completion--context-sort-history context)
@@ -2486,6 +2615,7 @@ The callback retains only this result's pass caches and settings."
   (let ((regexp-cache nucleo-completion--regexp-cache)
         (terms-cache nucleo-completion--terms-cache)
         (languages (copy-sequence nucleo-completion-languages))
+        (migemo-files (copy-sequence nucleo-completion-migemo-dictionary-files))
         (regexp-functions (copy-sequence nucleo-completion-regexp-functions))
         (minimum-term-length nucleo-completion-regexp-minimum-term-length)
         (ignore-case completion-ignore-case)
@@ -2500,6 +2630,7 @@ The callback retains only this result's pass caches and settings."
             (let* ((nucleo-completion--regexp-cache regexp-cache)
                    (nucleo-completion--terms-cache terms-cache)
                    (nucleo-completion-languages languages)
+                   (nucleo-completion-migemo-dictionary-files migemo-files)
                    (nucleo-completion-regexp-functions regexp-functions)
                    (nucleo-completion-regexp-minimum-term-length minimum-term-length)
                    (completion-ignore-case ignore-case)

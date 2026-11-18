@@ -26,6 +26,13 @@
   (unless (string-match-p (funcall (car case) (cadr case)) (caddr case))
     (error "loaded module language search failed: %S" case)))
 
+(dolist (case '(("keiji" "軽自")
+                ("pa-to" "パートナー")
+                ("toiawase" "問い合わせ")))
+  (let ((matcher (nucleo-completion-migemo-matcher (car case) nil)))
+    (unless (and matcher (nucleo-completion-language-match matcher (cadr case) 0 nil))
+      (error "loaded module Japanese direct matching failed: %S" case))))
+
 (unless (equal (nth 3 (nucleo-completion-candidates-with-regexp-groups
                        "nihon" (list "日本") nil nil nil nil 0 nil
                        (list (list "日本"))))

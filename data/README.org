@@ -16,12 +16,54 @@ https://github.com/oguna/yet-another-migemo-dict/releases/download/v0.6/migemo-c
   ~../LICENSES/migemo-dict-LICENSE~, ~migemo-dict-LICENSE_Mozc~, and
   ~migemo-dict-LICENSE_UniDic~.
 
-The file is embedded at compile time by ~src/languages.rs~.  Runtime use and
+The file is embedded at compile time by ~src/migemo.rs~.  Runtime use and
 local builds do not download a dictionary.  Rust dependencies are resolved by
 Cargo separately.
+
+The package also records the reported abbreviation ~軽自~ with the reading
+~けいじ~ in ~src/migemo.rs~.
 
 To update, choose an explicit upstream release, download its compact ZIP,
 verify and record the archive hash, then replace the dictionary and its three
 license files from that same archive.  Update this provenance record and run
 Rust tests and the native language ERT tests.  Do not substitute the C/Migemo
 text dictionary or a compact dictionary from a different source silently.
+
+* UniDic mixed-spelling supplement
+
+~migemo-unidic-extra-dict~ supplements the unchanged v0.6 dictionary with
+mixed kanji/kana spellings whose kana precedes a kanji.  These spellings fall
+outside the v0.6 upstream builder's stated filter.  The source is the
+National Institute for Japanese Language and Linguistics' UniDic contemporary
+written Japanese full package, version 2025.12, released 2025-12-31:
+
+https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-cwj-202512_full.zip
+
+The project selects the modified BSD option from the source's GPL/LGPL/BSD
+alternatives.  The original 2025.12 BSD notice is in
+~../LICENSES/unidic-cwj-202512-BSD~.  The archive SHA256 published by Lindera
+is ~ca02ad51c8ae238373dcb150eec014f1ad9f05f54c7416a16c2fe444fd4921b3~;
+~lex.csv~ extracted from it has SHA256
+~bd00a695ba897a3250965257341e1929ae062dfa2e63b223a05bcc02f22e74a2~
+and ZIP CRC32 ~7c045d92~.  The supplement has SHA256
+~3e1b616e32a55370f4e7eca4692dcda066340c65e1e62616fcd2080f31793f87~.
+The archive itself was not downloaded in full: the lexicon and BSD notice
+were retrieved by HTTP byte range and verified against their ZIP CRCs.
+
+To reproduce, verify the full archive hash and extract ~lex.csv~, then run:
+
+#+begin_src sh
+python3 data/build-unidic-extra.py /path/to/lex.csv > /tmp/unidic-extra.tsv
+cargo build
+rustc --edition=2021 -O data/build-unidic-extra.rs \
+  -L dependency=target/debug/deps \
+  --extern rustmigemo=PATH_TO_RUSTMIGEMO_RLIB \
+  -o /tmp/build-unidic-extra
+/tmp/build-unidic-extra /tmp/unidic-extra.tsv data/migemo-unidic-extra-dict
+#+end_src
+
+The extraction uses the surface and kana surface columns, converts katakana to
+hiragana, rejects unsupported characters, deduplicates and sorts pairs, and
+checks every pair after encoding.  This yielded 119,565 readings and 185,914
+pairs.  The TSV SHA256 is
+~cf30314ab556d6c8db2f5f8ee42eaf6bc6c1b9c941359d78f202c6ae21f649b3~.

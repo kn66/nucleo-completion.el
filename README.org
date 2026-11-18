@@ -124,7 +124,7 @@ To pin a release, set ~nucleo-completion-module-release-tag~ to a tag string
 before installing:
 
 #+begin_src emacs-lisp
-  (setq nucleo-completion-module-release-tag "v0.1.17")
+  (setq nucleo-completion-module-release-tag "v0.1.18")
 #+end_src
 
 When a module from an older installed release is loaded as a fallback, a warning
@@ -186,7 +186,7 @@ automatically after every push to ~main~.  It builds modules named
 
 After validation and all four platform-specific load checks succeed, the
 workflow automatically publishes a GitHub Release named after the Cargo package
-version, for example ~v0.1.17~.  The release includes the four modules, their
+version, for example ~v0.1.18~.  The release includes the four modules, their
 checksums, and license notices.  The module installer downloads these published
 Release assets, so no manual release step is needed for a new package version.
 
@@ -366,7 +366,7 @@ band highlighting requires the Rust module.
 
 With the Rust module, Japanese Migemo search is enabled by default.  For
 example, ~kensaku~ also finds ~検索~, and ~nihon~ finds ~日本~.  The module embeds
-its dictionary; no external ~cmigemo~ program, ~migemo.el~, dictionary download,
+its dictionaries; no external ~cmigemo~ program, ~migemo.el~, dictionary download,
 or dictionary path is needed at runtime.
 
 Select additional languages, or disable language expansion entirely:
@@ -390,17 +390,20 @@ separates syllables: ~xi'an~ finds ~西安~ without also matching ~先~, while
 ~xian~ considers both divisions.  It is character-based rather than a phrase
 pronunciation model; tone numbers and pinyin initials are not supported.
 Korean search accepts initial consonants, such as ~ㄱㅅ~ for ~감사~, including
-modern conjoining initials.  Complete Hangul syllables and ASCII letters or
+modern conjoining initials.  It matches both composed syllables and modern
+conjoining-jamo sequences.  Complete Hangul syllables and ASCII letters or
 digits can be mixed with initials.  At least one initial is required.
 
 Language matches use the same regexp-only ordering and highlighting described
 below.  Terms still combine with AND, so ~nihon txt~ can find ~日本.txt~.
 The existing two-character minimum also applies to language search.  Long or
 unsupported terms fall back to ordinary fuzzy matching.  Japanese expansion
-accepts at most 32 ASCII letters.  Chinese input accepts at most 32 characters,
+accepts at most 32 characters, including ASCII letters, hyphens for long vowels,
+and apostrophes after ~n~.  Chinese input accepts at most 32 characters,
 including syllable separators and the colon in ~u:~.  Korean terms accept at
-most 32 characters.  Large Chinese expansions are bounded to keep ambiguous
-inputs from producing unbounded regexps.
+most 32 characters.  Japanese, Chinese, and Korean use direct native matching,
+so ambiguous Chinese inputs do not require a large regexp.  Older modules
+fall back to the legacy regexp expanders, whose Chinese expansions are bounded.
 
 Language data is initialized lazily on first use.  Without the Rust module,
 language expansion is unavailable, while fuzzy matching and user-configured
@@ -408,17 +411,34 @@ Lisp expanders continue to work.  Native language availability is checked
 separately, so older modules that lack the functions are also safe to load.
 Rebuild the module and restart Emacs when upgrading an already loaded module.
 
-The bundled Japanese dictionary is ~yet-another-migemo-dict~ v0.6 (about
-1.4 MB uncompressed), derived from Mozc and UniDic.  Its source, checksum, and
-license texts are recorded in ~data/README.org~, ~THIRD-PARTY-NOTICES~, and
-~LICENSES/~.  Dictionary bytes are checked into the repository, so building
-never fetches a dictionary.  The module uses a pinned revision of ~rustmigemo~
-and the ~pinyin~ crate; Korean initial ranges need no external dictionary.
+The bundled Japanese dictionaries include the original
+~yet-another-migemo-dict~ v0.6, derived from Mozc and UniDic, and a supplement
+from the official UniDic contemporary written Japanese 2025.12 release.  Their
+sources, checksums, and license details are recorded in ~data/README.org~,
+~THIRD-PARTY-NOTICES~, and ~LICENSES/~.  Dictionary bytes are checked into the
+repository, so building never fetches a dictionary.  The module uses a pinned
+revision of ~rustmigemo~ and the ~pinyin~ crate; Korean initial ranges need no
+external dictionary.
 
 Japanese lookup accepts uppercase and mixed-case romaji.  ASCII alternatives
 preserve the original input spelling; the normal fuzzy matcher and
 ~completion-ignore-case~ control ASCII case matching.  The bundled Japanese
-backend does not add unrelated ASCII-only dictionary alternatives.
+backend does not add unrelated ASCII-only dictionary alternatives.  Hyphens
+represent long vowels, as in ~ko-hi-~ for ~コーヒー~, and an apostrophe separates
+~n~ from the following vowel, as in ~kan'i~ for ~簡易~.
+
+You can add local UTF-8 C/Migemo text dictionaries alongside the bundled data.
+Each line contains a reading followed by one or more spellings, separated by
+tabs.  The option defaults to nil; relative paths are resolved from
+~user-emacs-directory~.  Files are imported on demand and reloaded when they
+change.  An unreadable or invalid file produces a warning and other dictionaries
+remain available.  The package converts entries in memory and distributes its
+bundled dictionaries separately from the optional local files.
+
+#+begin_src emacs-lisp
+  (setq nucleo-completion-migemo-dictionary-files
+        '("/usr/share/cmigemo/utf-8/migemo-dict"))
+#+end_src
 
 ** Regexp Expanders
 
@@ -541,12 +561,21 @@ After rebuilding the module, restart graphical Emacs and check:
 - In Vertico and Corfu, enter ~kensaku~ against candidates containing ~検索~,
   ~kensaku~ and unrelated text.  Check that the Japanese result is visible and
   the matching characters are highlighted, including lazy highlighting.
+- Check ~keiji~ against ~軽自~ and ~軽自動車~, ~pa-to~ against ~パート~,
+  ~ko-hi-~ against ~コーヒー~, ~kan'i~ against ~簡易~, ~toiawase~ against
+  ~問い合わせ~, and ~moushiko~ against ~申し込み~.
+- Configure a local UTF-8 Migemo dictionary and check its candidates and
+  highlights alongside bundled matches.  Edit the file and confirm a later
+  completion uses the updated entries.
 - Enable all three languages and check ~zhongguo~ against ~中国~ and ~ㄱㅅ~
   against ~감사~.  Check mixed terms such as ~nihon txt~ against ~日本.txt~.
 - With ~completion-ignore-case~ nil, check that ~FOO~ does not find ~foo~;
   ~NIHON~ should still find ~日本~.  Repeat with case-insensitive completion.
 - With Chinese enabled, check ~lü~, ~lv~, and ~lu:~ against ~绿~, and
   ~xi'an~ against ~西安~ and ~先~.  Only ~西安~ should match the separated input.
+- Check ~yinhang~ against both ~银行~ and ~銀行~.  Check ~ㄱㅅ~ against ~감사~
+  and its decomposed spelling ~감사~.  The full matched text should be
+  highlighted in each case.
 - With lazy highlighting, scroll through language results and check consistent
   highlighting after changing buffers; a new completion must use its own
   language and case settings.

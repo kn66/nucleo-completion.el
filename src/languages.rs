@@ -1,70 +1,19 @@
 //! Language-specific expansions used by the completion regexp pipeline.
-use std::collections::{BTreeMap, BTreeSet};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::OnceLock;
 
+use crate::hangul::{HangulMatcher, SYLLABLES_PER_INITIAL};
+use crate::migemo::MigemoMatcher;
 use pinyin::ToPinyinMulti;
-use rustmigemo::migemo::{
-    compact_dictionary::CompactDictionary,
-    query::query_a_word_with_generator,
-    regex_generator::{RegexGeneratorTrait, RegexOperator},
-    ternary_regex_generator::TernaryRegexGenerator,
-};
 
-const MAX_TERM_CHARACTERS: usize = 32;
+pub(crate) const MAX_TERM_CHARACTERS: usize = 32;
 // Bound ambiguous pinyin suffix expansion and broad dictionary queries before
 // passing their results back to Emacs.  Lisp also rejects invalid regexps.
-const MAX_REGEXP_BYTES: usize = 100_000;
-// Unicode orders modern syllables by initial, then 21 vowels and 28 finals.
-const HANGUL_SYLLABLES_PER_INITIAL: u32 = 21 * 28;
+pub(crate) const MAX_REGEXP_BYTES: usize = 100_000;
 const CJK_IDEOGRAPH_START: u32 = 0x3400;
 const CJK_IDEOGRAPH_END: u32 = 0x3134f;
-static MIGEMO: OnceLock<CompactDictionary> = OnceLock::new();
 static PINYIN: OnceLock<BTreeMap<String, String>> = OnceLock::new();
-
-fn roman_term(term: &str) -> bool {
-    !term.is_empty()
-        && term.len() <= MAX_TERM_CHARACTERS
-        && term.bytes().all(|b| b.is_ascii_alphabetic())
-}
-
-// The dictionary can contain differently cased ASCII words.  Leave ASCII
-// matching to the original literal and Emacs's case-fold-search setting.
-struct LiteralPreservingMigemoGenerator {
-    literal: Vec<char>,
-    inner: TernaryRegexGenerator,
-}
-
-impl RegexGeneratorTrait for LiteralPreservingMigemoGenerator {
-    fn add(&mut self, word: &[char]) {
-        if word == self.literal || !word.iter().all(char::is_ascii) {
-            self.inner.add(word);
-        }
-    }
-
-    fn generate(&self, operator: &RegexOperator) -> String {
-        self.inner.generate(operator)
-    }
-}
-
-pub fn migemo_regexp(term: &str) -> Option<String> {
-    if !roman_term(term) {
-        return None;
-    }
-    let dictionary = MIGEMO.get_or_init(|| {
-        CompactDictionary::new(&include_bytes!("../data/migemo-compact-dict").to_vec())
-    });
-    let mut generator = LiteralPreservingMigemoGenerator {
-        literal: term.chars().collect(),
-        inner: TernaryRegexGenerator::new(),
-    };
-    let result = query_a_word_with_generator(
-        term,
-        dictionary,
-        &RegexOperator::EmacsNonNewline,
-        &mut generator,
-    );
-    (result.len() <= MAX_REGEXP_BYTES).then_some(result)
-}
 
 // Index all readings, including heteronyms, once; each value is safe inside an
 // Emacs bracket expression because the indexed characters are CJK ideographs.
@@ -121,6 +70,136 @@ pub fn pinyin_regexp(term: &str) -> Option<String> {
     expand_pinyin_suffixes(&term, PINYIN.get_or_init(pinyin_index))
 }
 
+enum PinyinStep {
+    Complete(usize),
+    Partial,
+}
+
+fn pinyin_step(syllable: &str, segment: &str, final_segment: bool) -> Option<PinyinStep> {
+    if segment.starts_with(syllable) {
+        // Consume the apostrophe only after the complete syllable before it.
+        let separator = usize::from(!final_segment && syllable.len() == segment.len());
+        Some(PinyinStep::Complete(syllable.len() + separator))
+    } else if final_segment && syllable.starts_with(segment) {
+        Some(PinyinStep::Partial)
+    } else {
+        None
+    }
+}
+
+pub enum LanguageMatcher {
+    Migemo(MigemoMatcher),
+    Pinyin(PinyinMatcher),
+    Hangul(HangulMatcher),
+}
+
+impl emacs::Transfer for LanguageMatcher {}
+
+impl LanguageMatcher {
+    pub fn find(&self, text: &str, start: usize, ignore_case: bool) -> Option<(usize, usize)> {
+        match self {
+            Self::Migemo(matcher) => matcher.find(text, start, ignore_case),
+            Self::Pinyin(matcher) => matcher.find(text, start),
+            Self::Hangul(matcher) => matcher.find(text, start, ignore_case),
+        }
+    }
+}
+
+pub struct PinyinMatcher {
+    transitions: HashMap<String, Vec<(u64, u64)>>,
+    terminal: u64,
+}
+
+impl PinyinMatcher {
+    pub fn new(term: &str) -> Option<Self> {
+        let term = normalize_pinyin(term)?;
+        // Each bit is a byte position in the normalized query. Sharing suffix
+        // states avoids duplicating character classes for every syllable split.
+        let terminal = 1 << term.len();
+        let mut reachable = terminal;
+        let mut transitions = HashMap::<_, Vec<_>>::new();
+        let index = PINYIN.get_or_init(pinyin_index);
+        for start in (0..term.len()).rev() {
+            if term.as_bytes()[start] == b'\'' {
+                continue;
+            }
+            let remaining = &term[start..];
+            let segment = remaining.split('\'').next().unwrap();
+            for syllable in index.keys() {
+                let end = match pinyin_step(syllable, segment, segment == remaining) {
+                    Some(PinyinStep::Complete(length)) => start + length,
+                    Some(PinyinStep::Partial) => term.len(),
+                    None => continue,
+                };
+                let from = 1 << start;
+                let to = 1 << end;
+                if reachable & to != 0 {
+                    transitions
+                        .entry(syllable.clone())
+                        .or_default()
+                        .push((from, to));
+                    reachable |= from;
+                }
+            }
+        }
+        (reachable & 1 != 0).then_some(Self {
+            transitions,
+            terminal,
+        })
+    }
+
+    pub fn find(&self, text: &str, start: usize) -> Option<(usize, usize)> {
+        let mut suffix = text.chars();
+        for _ in 0..start {
+            suffix.next()?;
+        }
+        let mut offset = start;
+        while let Some(first) = suffix.next() {
+            let mut states = 1;
+            let mut end = None;
+            for (index, character) in std::iter::once(first).chain(suffix.clone()).enumerate() {
+                states = self.advance(states, character);
+                if states == 0 {
+                    break;
+                }
+                if states & self.terminal != 0 {
+                    end = Some(offset + index + 1);
+                }
+                if states == self.terminal {
+                    break;
+                }
+            }
+            if let Some(end) = end {
+                return Some((offset, end));
+            }
+            offset += 1;
+        }
+        None
+    }
+
+    fn advance(&self, states: u64, character: char) -> u64 {
+        let mut next = 0;
+        if let Some(readings) = character.to_pinyin_multi() {
+            for reading in readings {
+                let plain = reading.plain();
+                let reading = if plain.contains('ü') {
+                    Cow::Owned(plain.replace('ü', "v"))
+                } else {
+                    Cow::Borrowed(plain)
+                };
+                if let Some(edges) = self.transitions.get(reading.as_ref()) {
+                    for &(from, to) in edges {
+                        if states & from != 0 {
+                            next |= to;
+                        }
+                    }
+                }
+            }
+        }
+        next
+    }
+}
+
 // Normalization guarantees ASCII, so syllable and apostrophe positions are
 // valid UTF-8 byte boundaries. Work backwards so alternatives with the same
 // suffix share its computation.
@@ -137,16 +216,14 @@ fn expand_pinyin_suffixes(term: &str, index: &BTreeMap<String, String>) -> Optio
         let mut alternatives = Vec::new();
         let mut partial = BTreeSet::new();
         for (syllable, characters) in index {
-            if segment.starts_with(syllable) {
-                let mut end = start + syllable.len();
-                if end < term.len() && term.as_bytes()[end] == b'\'' {
-                    end += 1;
+            match pinyin_step(syllable, segment, final_segment) {
+                Some(PinyinStep::Complete(length)) => {
+                    if let Some(suffix) = &suffixes[start + length] {
+                        alternatives.push(format!("[{characters}]{suffix}"));
+                    }
                 }
-                if let Some(suffix) = &suffixes[end] {
-                    alternatives.push(format!("[{characters}]{suffix}"));
-                }
-            } else if final_segment && syllable.starts_with(segment) {
-                partial.extend(characters.chars());
+                Some(PinyinStep::Partial) => partial.extend(characters.chars()),
+                None => {}
             }
         }
         if !partial.is_empty() {
@@ -189,9 +266,8 @@ pub fn hangul_regexp(term: &str) -> Option<String> {
         });
         if let Some(index) = index {
             has_initial = true;
-            let first =
-                char::from_u32(0xac00 + index as u32 * HANGUL_SYLLABLES_PER_INITIAL).unwrap();
-            let last = char::from_u32(first as u32 + HANGUL_SYLLABLES_PER_INITIAL - 1).unwrap();
+            let first = char::from_u32(0xac00 + index as u32 * SYLLABLES_PER_INITIAL).unwrap();
+            let last = char::from_u32(first as u32 + SYLLABLES_PER_INITIAL - 1).unwrap();
             result.push_str(&format!("[{character}{first}-{last}]"));
         } else if ('가'..='힣').contains(&character) || character.is_ascii_alphanumeric() {
             result.push(character);
@@ -206,37 +282,37 @@ pub fn hangul_regexp(term: &str) -> Option<String> {
 mod tests {
     use super::*;
     #[test]
-    fn migemo_is_cached_and_rejects_invalid_terms() {
-        assert!(migemo_regexp("kensaku").unwrap().contains("検索"));
-        let first = MIGEMO.get().unwrap() as *const _;
-        assert!(migemo_regexp("nihon").is_some());
-        assert_eq!(first, MIGEMO.get().unwrap() as *const _);
-        assert!(migemo_regexp("a.*").is_none());
-        assert!(migemo_regexp("").is_none());
-        assert!(migemo_regexp(&"a".repeat(33)).is_none());
+    fn pinyin_matches_ambiguous_terms_and_character_ranges_directly() {
+        let matcher = PinyinMatcher::new("yinhang").unwrap();
+        assert_eq!(matcher.find("😀銀行 银行", 0), Some((1, 3)));
+        assert_eq!(matcher.find("😀銀行 银行", 3), Some((4, 6)));
+        assert_eq!(matcher.find("银-行", 0), None);
+        let term = "yinhang".repeat(4);
+        assert_eq!(
+            PinyinMatcher::new(&term)
+                .unwrap()
+                .find("银行银行银行银行", 0),
+            Some((0, 8))
+        );
     }
-    #[test]
-    fn migemo_preserves_literal_case_and_japanese_lookup() {
-        let upper = migemo_regexp("KENSAKU").unwrap();
-        assert!(upper.contains("KENSAKU"));
-        assert!(upper.contains("検索"));
-        assert!(!upper.contains("kensaku"));
-        let mixed = migemo_regexp("KenSaku").unwrap();
-        assert!(mixed.contains("KenSaku"));
-        assert!(mixed.contains("検索"));
 
-        let mut generator = LiteralPreservingMigemoGenerator {
-            literal: "FOO".chars().collect(),
-            inner: TernaryRegexGenerator::new(),
-        };
-        for word in ["FOO", "foo", "ＦＯＯ", "日本"] {
-            generator.add(&word.chars().collect::<Vec<_>>());
+    #[test]
+    fn pinyin_direct_matching_preserves_notation_and_boundaries() {
+        for term in ["LÜ", "lv", "lu:"] {
+            assert_eq!(
+                PinyinMatcher::new(term).unwrap().find("绿", 0),
+                Some((0, 1))
+            );
         }
-        let result = generator.generate(&RegexOperator::EmacsNonNewline);
-        assert!(result.contains("FOO"));
-        assert!(!result.contains("foo"));
-        assert!(result.contains("ＦＯＯ") && result.contains("日本"));
+        let separated = PinyinMatcher::new("xi'an").unwrap();
+        assert_eq!(separated.find("先", 0), None);
+        assert_eq!(separated.find("西安", 0), Some((0, 2)));
+        let partial = PinyinMatcher::new("zhongg").unwrap();
+        assert_eq!(partial.find("中國", 0), Some((0, 2)));
+        assert!(PinyinMatcher::new("txt").is_none());
+        assert!(PinyinMatcher::new("zhong1guo2").is_none());
     }
+
     #[test]
     fn pinyin_suffix_expansion_respects_boundaries_and_size_limit() {
         let index = BTreeMap::from([

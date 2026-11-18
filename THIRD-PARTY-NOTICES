@@ -21,6 +21,13 @@ Japanese dictionary:
     LICENSES/migemo-dict-LICENSE_UniDic
   See data/README.org for the source archive and SHA256 checksums.
 
+Japanese mixed-spelling supplement:
+  UniDic contemporary written Japanese, 2025.12
+  https://clrd.ninjal.ac.jp/unidic_archive/2512/unidic-cwj-202512_full.zip
+  Copyright (c) 2023 National Institute for Japanese Language and Linguistics
+  Modified BSD option: LICENSES/unidic-cwj-202512-BSD
+  See data/README.org for source and generation details.
+
 Chinese character readings:
   pinyin 0.11.0
   https://github.com/mozillazg/rust-pinyin

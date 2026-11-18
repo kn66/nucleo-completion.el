@@ -1,4 +1,7 @@
+mod hangul;
 mod languages;
+mod migemo;
+mod migemo_dictionary;
 mod regexp;
 
 use regexp::RegexpGroups;
@@ -910,7 +913,32 @@ fn candidates_with_options<'e>(
 /// Return nil for unsupported terms or expansions exceeding the size limit.
 #[defun]
 fn migemo_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
-    languages::migemo_regexp(&term).into_lisp(env)
+    migemo::migemo_regexp(&term).into_lisp(env)
+}
+
+/// Import a local UTF-8 Migemo text dictionary from PATH.
+#[defun]
+fn migemo_load_dictionary<'e>(env: &'e Env, path: String) -> Result<Value<'e>> {
+    let dictionary = migemo_dictionary::load(std::path::Path::new(&path))?;
+    Box::new(migemo::MigemoDictionary(dictionary)).into_lisp(env)
+}
+
+/// Compile TERM with the bundled and optional local Japanese DICTIONARIES.
+#[defun]
+fn migemo_matcher<'e>(
+    env: &'e Env,
+    term: String,
+    mut dictionaries: Value<'e>,
+) -> Result<Value<'e>> {
+    let mut extra = Vec::new();
+    while dictionaries.is_not_nil() {
+        extra.push(dictionaries.car::<&migemo::MigemoDictionary>()?);
+        dictionaries = dictionaries.cdr()?;
+    }
+    migemo::MigemoMatcher::new(&term, &extra)
+        .map(languages::LanguageMatcher::Migemo)
+        .map(Box::new)
+        .into_lisp(env)
 }
 
 /// Return an Emacs regexp for toneless pinyin TERM.
@@ -928,6 +956,39 @@ fn pinyin_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
 #[defun]
 fn hangul_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
     languages::hangul_regexp(&term).into_lisp(env)
+}
+
+/// Compile TERM for direct matching in LANGUAGE.
+/// Return an opaque matcher, or nil for an unsupported term or language.
+#[defun]
+fn language_matcher<'e>(env: &'e Env, language: Value<'e>, term: String) -> Result<Value<'e>> {
+    use languages::{LanguageMatcher, PinyinMatcher};
+
+    let matcher = if language == env.intern("chinese")? {
+        PinyinMatcher::new(&term).map(LanguageMatcher::Pinyin)
+    } else if language == env.intern("korean")? {
+        hangul::HangulMatcher::new(&term).map(LanguageMatcher::Hangul)
+    } else {
+        None
+    };
+    matcher.map(Box::new).into_lisp(env)
+}
+
+/// Find the first match from character offset START in TEXT.
+/// Return (BEGIN . END) in character offsets, or nil.
+#[defun]
+fn language_match<'e>(
+    env: &'e Env,
+    matcher: Value<'e>,
+    text: String,
+    start: usize,
+    ignore_case: Value<'e>,
+) -> Result<Value<'e>> {
+    let matcher: &languages::LanguageMatcher = matcher.into_rust()?;
+    match matcher.find(&text, start, ignore_case.is_not_nil()) {
+        Some((begin, end)) => env.cons(begin, end),
+        None => ().into_lisp(env),
+    }
 }
 
 #[defun]
