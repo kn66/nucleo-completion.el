@@ -7,7 +7,7 @@ mod regexp;
 use regexp::RegexpGroups;
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
+use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
 
 use emacs::{defun, Env, IntoLisp, Result, Value};
@@ -33,6 +33,16 @@ struct CandidateScan<'e, T> {
 struct RegexpOnlyCandidate<'e> {
     value: Value<'e>,
     non_ascii: bool,
+    filename_priority: u8,
+}
+
+fn order_regexp_only_filenames(candidates: &mut [RegexpOnlyCandidate<'_>]) {
+    if candidates
+        .iter()
+        .any(|candidate| candidate.filename_priority > 0)
+    {
+        candidates.sort_by_key(|candidate| Reverse(candidate.filename_priority));
+    }
 }
 
 struct ScoredCandidate<'e> {
@@ -190,6 +200,7 @@ fn score_lisp_candidates<'e>(
     with_matcher(|matcher| {
         let mut matches = Vec::new();
         let mut regexp_only = Vec::new();
+        let mut regexp_scan = regexp_groups.map(|groups| (groups, groups.scratch()));
         let mut list = candidates;
         let mut index = 0;
         let mut utf32_buf = Vec::new();
@@ -201,10 +212,14 @@ fn score_lisp_candidates<'e>(
                 scored_lisp_candidate(pattern, value, index, &text, matcher, &mut utf32_buf)
             {
                 matches.push(candidate);
-            } else if regexp_groups.is_some_and(|groups| groups.is_match(&text)) {
+            } else if let Some(filename_priority) = regexp_scan
+                .as_mut()
+                .and_then(|(groups, scratch)| groups.match_quality(&text, scratch))
+            {
                 regexp_only.push(RegexpOnlyCandidate {
                     value,
                     non_ascii: !text.is_ascii(),
+                    filename_priority,
                 });
             }
             list = list.cdr()?;
@@ -214,6 +229,7 @@ fn score_lisp_candidates<'e>(
             }
         }
 
+        order_regexp_only_filenames(&mut regexp_only);
         Ok(Some(CandidateScan {
             matches,
             regexp_only,
@@ -258,6 +274,7 @@ fn score_lisp_candidates_with_ties<'e>(
     with_matcher(|matcher| {
         let mut matches = Vec::new();
         let mut regexp_only = Vec::new();
+        let mut regexp_scan = regexp_groups.map(|groups| (groups, groups.scratch()));
         let mut list = candidates;
         let mut index = 0;
         let mut utf32_buf = Vec::new();
@@ -276,10 +293,14 @@ fn score_lisp_candidates_with_ties<'e>(
                 &mut utf32_buf,
             ) {
                 matches.push(candidate);
-            } else if regexp_groups.is_some_and(|groups| groups.is_match(&text)) {
+            } else if let Some(filename_priority) = regexp_scan
+                .as_mut()
+                .and_then(|(groups, scratch)| groups.match_quality(&text, scratch))
+            {
                 regexp_only.push(RegexpOnlyCandidate {
                     value,
                     non_ascii: !text.is_ascii(),
+                    filename_priority,
                 });
             }
             list = list.cdr()?;
@@ -289,6 +310,7 @@ fn score_lisp_candidates_with_ties<'e>(
             }
         }
 
+        order_regexp_only_filenames(&mut regexp_only);
         Ok(Some(CandidateScan {
             matches,
             regexp_only,
@@ -828,10 +850,7 @@ fn candidates_with_options<'e>(
         return interrupted_bundle(env);
     }
     let groups = if regexp_groups.is_not_nil() {
-        if ignore_case.is_not_nil() {
-            return env.intern("nucleo-completion-unsupported-regexp");
-        }
-        let Some(groups) = RegexpGroups::from_lisp(regexp_groups)? else {
+        let Some(groups) = RegexpGroups::from_lisp(regexp_groups, ignore_case.is_not_nil())? else {
             return env.intern("nucleo-completion-unsupported-regexp");
         };
         Some(groups)
@@ -991,6 +1010,29 @@ fn language_match<'e>(
     }
 }
 
+/// Return the best filename priority among MATCHERS for TEXT.
+#[defun]
+fn filename_match_priority<'e>(
+    env: &'e Env,
+    mut matchers: Value<'e>,
+    text: String,
+    ignore_case: Value<'e>,
+) -> Result<Value<'e>> {
+    let mut priority = 0;
+    while matchers.is_not_nil() {
+        let matcher = matchers.car::<&languages::LanguageMatcher>()?;
+        if matcher.has_filename_priority() {
+            priority = priority.max(
+                matcher
+                    .match_quality(&text, ignore_case.is_not_nil())
+                    .unwrap_or(0),
+            );
+        }
+        matchers = matchers.cdr()?;
+    }
+    usize::from(priority).into_lisp(env)
+}
+
 #[defun]
 fn module_version<'e>(env: &'e Env) -> Result<Value<'e>> {
     MODULE_VERSION.into_lisp(env)
@@ -1072,7 +1114,7 @@ fn candidates_with_regexp_groups<'e>(
     if ignore_case.is_not_nil() {
         return env.intern("nucleo-completion-unsupported-regexp");
     }
-    let Some(groups) = RegexpGroups::from_lisp(regexp_groups)? else {
+    let Some(groups) = RegexpGroups::from_lisp(regexp_groups, false)? else {
         return env.intern("nucleo-completion-unsupported-regexp");
     };
     candidates_impl(

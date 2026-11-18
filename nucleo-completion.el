@@ -65,6 +65,8 @@
 (declare-function nucleo-completion-language-match
                   "ext:nucleo-completion-module"
                   (matcher text start ignore-case))
+(declare-function nucleo-completion-filename-match-priority
+                  "ext:nucleo-completion-module" (matchers text ignore-case))
 (declare-function mm-destroy-parts "mm-decode")
 (declare-function mm-dissect-buffer "mm-decode")
 (declare-function mm-save-part-to-file "mm-decode")
@@ -1022,19 +1024,49 @@ least one alternative from every group."
        (cl-some #'nucleo-completion--regexp-function-regexps
                 (nucleo-completion--terms needle))))
 
-(defun nucleo-completion--regexp-only-term-regexps (term)
-  "Return matchers for TERM in the module regexp-only pass.
-When TERM has configured regexp expansions, return only those
-alternatives because the Rust module has already handled fuzzy matching.
-Terms without configured expansions still use the fuzzy matcher so
-they can combine with expanded terms."
-  (or (nucleo-completion--regexp-function-regexps term)
-      (list (nucleo-completion--term-fuzzy-regexp term))))
+(defun nucleo-completion--folded-fuzzy (term equivalents)
+  "Encode Emacs case EQUIVALENTS for each character of fuzzy TERM."
+  (cons 'nucleo-completion--folded-fuzzy
+        (cl-loop for character across term
+                 collect (let ((members (list character))
+                               (next (aref equivalents character)))
+                           (while (and (characterp next)
+                                       (not (memq next members)))
+                             (push next members)
+                             (setq next (aref equivalents next)))
+                           (apply #'string members)))))
 
-(defun nucleo-completion--regexp-only-regexp-groups (needle)
-  "Return regexp groups for preserving regexp-only matches to NEEDLE."
-  (mapcar #'nucleo-completion--regexp-only-term-regexps
-          (nucleo-completion--terms needle)))
+(defun nucleo-completion--regexp-only-regexp-groups (needle &optional equivalents)
+  "Return match groups for NEEDLE that require an expansion match.
+Each term can match fuzzily or through an expansion.  The module
+has already scored purely fuzzy matches, so require a candidate
+to also match at least one expansion.  EQUIVALENTS is the Emacs
+case equivalence table for the native case-insensitive scan."
+  (let* ((terms (nucleo-completion--terms needle))
+         (expansions (mapcar #'nucleo-completion--regexp-function-regexps terms))
+         (expanded (delq nil (copy-sequence expansions)))
+         (multiple-expanded (cdr expanded)))
+    ;; A single expanded term can enforce the expansion requirement by
+    ;; itself.  Otherwise, require at least one of the expansions in
+    ;; addition to the per-term groups.
+    (append (when multiple-expanded
+              (list (apply #'append expanded)))
+            (cl-mapcar (lambda (term alternatives)
+                         (if (and alternatives (not multiple-expanded))
+                             alternatives
+                           (cons (if equivalents
+                                     (nucleo-completion--folded-fuzzy term equivalents)
+                                   (nucleo-completion--term-fuzzy-regexp term))
+                                 alternatives)))
+                       terms expansions))))
+
+(defun nucleo-completion--native-regexp-groups (needle)
+  "Return groups for the native scan of NEEDLE with the current case settings."
+  (if completion-ignore-case
+      (let ((equivalents (char-table-extra-slot (current-case-table) 2)))
+        (when (char-table-p equivalents)
+          (nucleo-completion--regexp-only-regexp-groups needle equivalents)))
+    (nucleo-completion--regexp-only-regexp-groups needle)))
 
 (defun nucleo-completion--regexp-match-p (regexp-groups candidate)
   "Return non-nil if CANDIDATE matches REGEXP-GROUPS."
@@ -1464,6 +1496,16 @@ translated."
   (and (eq (car-safe err) 'wrong-type-argument)
        (eq (cadr err) 'unicode-string-p)))
 
+(defun nucleo-completion--language-match-text (candidate)
+  "Replace non-Unicode characters in CANDIDATE without shifting offsets."
+  ;; Completion frontends may embed characters the module cannot read.
+  (let ((max nucleo-completion--max-unicode-codepoint))
+    (apply #'string
+           (cl-loop for ch across candidate
+                    collect (if (or (> ch max) (<= #xd800 ch #xdfff))
+                                #xfffd
+                              ch)))))
+
 (defun nucleo-completion--language-match (matcher candidate start)
   "Find MATCHER's next match in CANDIDATE at or after character START."
   (condition-case err
@@ -1471,15 +1513,9 @@ translated."
     (wrong-type-argument
      (unless (nucleo-completion--module-unicode-error-p err)
        (signal (car err) (cdr err)))
-     ;; Preserve the original offsets and boundaries when a frontend embeds
-     ;; non-Unicode characters that the module cannot read.
-     (let* ((max nucleo-completion--max-unicode-codepoint)
-            (text (apply #'string
-                         (cl-loop for ch across candidate
-                                  collect (if (or (> ch max) (<= #xd800 ch #xdfff))
-                                              #xfffd
-                                            ch)))))
-       (nucleo-completion-language-match matcher text start case-fold-search)))))
+     (nucleo-completion-language-match
+      matcher (nucleo-completion--language-match-text candidate)
+      start case-fold-search))))
 
 (defun nucleo-completion--module-results-with-scrub
     (needle candidates ignore-case highlight-limit return-all-scores
@@ -1877,6 +1913,45 @@ Walk SCORABLE once."
   "Return synthetic top-info entries for regexp-only CANDIDATES with SCORE."
   (mapcar (lambda (candidate) (list candidate score nil)) candidates))
 
+(defun nucleo-completion--order-regexp-only-filenames (needle candidates)
+  "Prefer filename matches for NEEDLE while keeping equal CANDIDATES in order."
+  (let ((matchers
+         (when (and (cdr candidates)
+                    (memq 'japanese nucleo-completion-languages)
+                    (fboundp 'nucleo-completion-filename-match-priority))
+           (cl-loop for term in (nucleo-completion--terms needle)
+                    when (string-search "." term)
+                    append (cl-remove-if-not
+                            #'user-ptrp
+                            (nucleo-completion--regexp-function-regexps term))))))
+    (if (null matchers)
+        candidates
+      (let ((ranked
+             (mapcar
+              (lambda (candidate)
+                (cons
+                 (condition-case err
+                     (nucleo-completion-filename-match-priority
+                      matchers candidate completion-ignore-case)
+                   (wrong-type-argument
+                    (unless (nucleo-completion--module-unicode-error-p err)
+                      (signal (car err) (cdr err)))
+                    ;; A trailing disambiguation marker is invisible and
+                    ;; should not make the extension look non-terminal.
+                    (let ((end (length candidate)))
+                      (while (and (> end 0)
+                                  (> (aref candidate (1- end))
+                                     nucleo-completion--max-unicode-codepoint))
+                        (setq end (1- end)))
+                      (nucleo-completion-filename-match-priority
+                       matchers
+                       (nucleo-completion--language-match-text
+                        (substring candidate 0 end))
+                       completion-ignore-case))))
+                 candidate))
+              candidates)))
+        (mapcar #'cdr (cl-stable-sort ranked #'> :key #'car))))))
+
 (defun nucleo-completion--regexp-only-score-candidates
     (candidates score propertize-p)
   "Return (CANDIDATES . SCORES) for regexp-only CANDIDATES.
@@ -1914,8 +1989,10 @@ it is nil, instead of scanning SCORABLE.  Candidates are partitioned
 according to `nucleo-completion-regexp-only-match-priority'."
   (pcase-let* ((`(,module-candidates ,top-info ,full-scores) bundle)
                (extra (if precomputed-extra-p precomputed-extra
-                        (nucleo-completion--regexp-only-candidates
-                         needle scorable module-candidates))))
+                        (nucleo-completion--order-regexp-only-filenames
+                         needle
+                         (nucleo-completion--regexp-only-candidates
+                          needle scorable module-candidates)))))
     (if (null extra)
         bundle
       (let* ((max-score (when (or full-scores include-top-info-p)
@@ -2341,17 +2418,17 @@ including when scrubbing could change history identity."
              'nucleo-completion-unsupported-regexp))
     (let* ((rank-table (and (cdr all)
                             (nucleo-completion--history-rank-table prefix)))
-           (fast-p (and expanded-regexp-p nucleo-completion-languages
-                        (null nucleo-completion-regexp-functions)
-                        (not completion-ignore-case)
-                        (nthcdr
-                         (1- nucleo-completion--native-regexp-minimum-candidates)
-                         all)))
+           (regexp-groups
+            (and expanded-regexp-p nucleo-completion-languages
+                 (null nucleo-completion-regexp-functions)
+                 (nthcdr (1- nucleo-completion--native-regexp-minimum-candidates)
+                         all)
+                 (nucleo-completion--native-regexp-groups needle)))
            (include-extra-info (and (> highlight-limit 0)
                                     nucleo-completion-highlight-score-bands
                                     (not need-full-scores)))
            history-entries bundle)
-      (unless (or rank-table fast-p)
+      (unless (or rank-table regexp-groups)
         (throw 'nucleo-completion-native-unavailable
                'nucleo-completion-unsupported-regexp))
       (when rank-table
@@ -2373,12 +2450,11 @@ including when scrubbing could change history identity."
                    nucleo-completion-sort-ties-by-length
                    nucleo-completion-sort-ties-alphabetically history-entries
                    highlight-limit need-full-scores
-                   (and fast-p
-                        (nucleo-completion--regexp-only-regexp-groups needle))
+                   regexp-groups
                    nucleo-completion-regexp-only-match-priority
                    include-extra-info))
             (when (eq bundle 'nucleo-completion-unsupported-regexp)
-              (setq fast-p nil
+              (setq regexp-groups nil
                     bundle
                     (nucleo-completion-candidates-with-options
                      needle all completion-ignore-case
@@ -2392,7 +2468,7 @@ including when scrubbing could change history identity."
             (when need-full-scores
               (nucleo-completion--native-score-properties bundle))
             (setq bundle (list (nth 0 bundle) (nth 1 bundle) (nth 2 bundle)))
-            (when (and expanded-regexp-p (not fast-p))
+            (when (and expanded-regexp-p (not regexp-groups))
               (setq bundle
                     (nucleo-completion--merge-regexp-only-matches
                      needle all bundle include-extra-info)))

@@ -2468,6 +2468,32 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                  0 'face (nucleo-completion-highlight
                           query (copy-sequence candidate))))))))
 
+(ert-deftest nucleo-completion-native-japanese-short-prefix-test ()
+  "Short prefixes remain safe with the bundled and a tiny local dictionary."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-migemo-matcher)
+                    (fboundp 'nucleo-completion-migemo-load-dictionary)))
+  (let* ((file (make-temp-file "nucleo-migemo-tiny-"))
+         (nucleo-completion-languages '(japanese))
+         (nucleo-completion-regexp-functions nil)
+         (nucleo-completion--migemo-dictionary-cache nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "けいじ\t独自掲示\n"))
+          (dolist (dictionary-files (list nil (list file)))
+            (let ((nucleo-completion-migemo-dictionary-files dictionary-files))
+              (dolist (case '(("keij" "軽自動車") ("keiz" "経済")))
+                (should (member (cadr case)
+                                (nucleo-completion-tests--plain
+                                 (nucleo-completion-all-completions
+                                  (car case) (list (cadr case) "無関係"))))))
+              (when dictionary-files
+                (should (member "独自掲示"
+                                (nucleo-completion-tests--plain
+                                 (nucleo-completion-all-completions
+                                  "keij" '("独自掲示" "無関係")))))))))
+      (delete-file file))))
+
 (ert-deftest nucleo-completion-native-japanese-local-dictionary-test ()
   "Import local entries, reload a changed file, and tolerate missing files."
   (skip-unless (and (nucleo-completion--module-ready-p)
@@ -2506,6 +2532,127 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                                    (nucleo-completion-all-completions
                                     "kensaku" '("検索" "無関係")))))))
       (when (file-exists-p file) (delete-file file)))))
+
+(ert-deftest nucleo-completion-native-japanese-filename-terms-test ()
+  "Use language and fuzzy matches together when completing filenames."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-migemo-matcher)))
+  (let ((nucleo-completion-languages '(japanese))
+        (nucleo-completion-regexp-functions nil)
+        (nucleo-completion-migemo-dictionary-files nil)
+        (nucleo-completion--native-regexp-minimum-candidates 1))
+    ;; Exercise both case settings with the native scan enabled.
+    (dolist (completion-ignore-case '(nil t))
+      (dolist (case '(("nihon rpt" "日本-report.txt" "米国-report.txt" "日本-notes.txt")
+                      ("nihon.txt" "日本.txt" "日本Xtxt" "日本.org")
+                      ("kaigi2026" "会議2026.org" "会議2025.org" "会議-2026.org")
+                      ("kaigi2026.org" "会議2026.org" "会議2026.txt")
+                      ("kaigi-2026" "会議-2026.org" "会議2026.org" "会議_2026.org")
+                      ("nihon_report" "日本_report.txt" "日本-report.txt")
+                      ("2026kaigi" "2026会議.org" "2025会議.org")
+                      ("2026-kaigi" "2026-会議.org" "2026_会議.org")
+                      ("2026_kaigi" "2026_会議.org" "2026-会議.org")
+                      ("pa-to.txt" "パートナー.txt" "パートナー.pdf"
+                       "パート/ナー.txt" "パート\\ナー.txt" "パート\nナー.txt")
+                      ("pa-to" "パートナー" "相棒")))
+        (should (equal (nucleo-completion-tests--plain
+                        (nucleo-completion-all-completions (car case) (cdr case)))
+                       (list (cadr case))))))
+    (should (equal (nucleo-completion-try-completion
+                    "nihon.txt" '("日本.txt") nil 9)
+                   '("日本.txt" . 6)))
+    (let ((highlighted (nucleo-completion-highlight
+                        "nihon rpt" (copy-sequence "日本-report.txt"))))
+      (dolist (index '(0 1 3 5 8))
+        (should (get-text-property index 'face highlighted)))
+      (should-not (get-text-property 2 'face highlighted)))
+    (let ((highlighted (nucleo-completion-highlight
+                        "nihon.txt" (copy-sequence "日本.txt"))))
+      (dotimes (index (length highlighted))
+        (should (get-text-property index 'face highlighted))))
+    (let ((highlighted (nucleo-completion-highlight
+                        "pa-to.txt" (copy-sequence "パートナー.txt"))))
+      (dotimes (index (length highlighted))
+        (should (get-text-property index 'face highlighted))))
+    (let ((regexp (nucleo-completion-migemo-regexp "nihon.txt")))
+      (should (string-match-p regexp "日本.txt"))
+      (should-not (string-match-p regexp "日本Xtxt")))
+    (let ((regexp (nucleo-completion-migemo-regexp "pa-to.txt")))
+      (should (string-match-p regexp "パートナー.txt"))
+      (should-not (string-match-p regexp "パート/ナー.txt"))
+      (should-not (string-match-p regexp "パート\\ナー.txt"))
+      (should-not (string-match-p regexp "パート\nナー.txt")))))
+
+(ert-deftest nucleo-completion-native-japanese-filename-order-test ()
+  "Preserve priority partitions and stable filename ordering in both scans."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-migemo-matcher)
+                    (fboundp 'nucleo-completion-filename-match-priority)))
+  (let ((nucleo-completion-languages '(japanese))
+        (nucleo-completion-regexp-functions nil)
+        (nucleo-completion-migemo-dictionary-files nil))
+    (dolist (completion-ignore-case '(nil t))
+      (dolist (threshold '(1 100))
+        (let ((nucleo-completion--native-regexp-minimum-candidates threshold))
+          (dolist (priority '(before after non-ascii))
+            (let* ((nucleo-completion-regexp-only-match-priority priority)
+                   (actual (nucleo-completion-tests--plain
+                            (nucleo-completion-all-completions
+                             "nihon.txt"
+                             '("日本.txt.bak" "日本語.txt" "日本人.txt"
+                               "新日本.txt" "nihon.txt" "日本.txt"))))
+                   (language '("日本.txt" "日本語.txt" "日本人.txt" "新日本.txt"
+                               "日本.txt.bak")))
+              (should (equal actual
+                             (if (eq priority 'after)
+                                 (append '("nihon.txt") language)
+                               (append language '("nihon.txt")))))))
+          (should (equal (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "pa-to.txt" '("パートナー.txt.bak" "パートナー.txt")))
+                         '("パートナー.txt" "パートナー.txt.bak")))
+          (let ((marked (concat "日本.txt" (string #x3fff80))))
+            (should (equal (nucleo-completion-tests--plain
+                            (nucleo-completion-all-completions
+                             "nihon.txt" (list "日本語.txt" marked)))
+                           (list marked "日本語.txt")))))))))
+
+(ert-deftest nucleo-completion-native-case-folded-language-scan-test ()
+  "The large-list native scan agrees with Emacs case-folded Lisp matching."
+  (skip-unless (and (nucleo-completion--module-ready-p)
+                    (fboundp 'nucleo-completion-candidates-with-options)
+                    (fboundp 'nucleo-completion-migemo-matcher)))
+  (let* ((nucleo-completion-languages '(japanese))
+         (nucleo-completion-regexp-functions nil)
+         (nucleo-completion-migemo-dictionary-files nil)
+         (completion-ignore-case t)
+         (table (append '("日本Ä" "日本ä" "日本B" "米国Ä")
+                        (make-list 4092 "無関係")))
+         (query "nihon ä")
+         (fallback (let ((nucleo-completion--native-regexp-minimum-candidates
+                          (1+ (length table))))
+                     (nucleo-completion-tests--plain
+                      (nucleo-completion-all-completions query table))))
+         (native (cl-letf (((symbol-function
+                             'nucleo-completion--merge-regexp-only-matches)
+                            (lambda (&rest _) (error "Unexpected Lisp merge"))))
+                   (nucleo-completion-tests--plain
+                    (nucleo-completion-all-completions query table)))))
+    (should (member "日本Ä" fallback))
+    (should (member "日本ä" fallback))
+    (should-not (member "日本B" fallback))
+    (should (equal native fallback))
+    (with-temp-buffer
+      (let ((case-table (copy-case-table (standard-case-table)))
+            (nucleo-completion--native-regexp-minimum-candidates 1))
+        (set-case-syntax-pair #x2603 ?q case-table)
+        (set-case-table case-table)
+        (cl-letf (((symbol-function 'nucleo-completion--merge-regexp-only-matches)
+                   (lambda (&rest _) (error "Unexpected Lisp merge"))))
+          (should (equal (nucleo-completion-tests--plain
+                          (nucleo-completion-all-completions
+                           "nihon q" '("日本☃" "日本B" "米国☃")))
+                         '("日本☃"))))))))
 
 (ert-deftest nucleo-completion-native-language-non-unicode-offsets-test ()
   "Keep non-Unicode candidate boundaries and lazy highlight offsets."
@@ -2702,6 +2849,18 @@ The stub returns TRIPLES wrapped as a module-result bundle."
                          (list (concat "\\`"
                                        (nucleo-completion--subsequence-regexp
                                         "go"))))))))
+
+(ert-deftest nucleo-completion-regexp-only-groups-require-an-expansion-test ()
+  (let* ((nucleo-completion-languages nil)
+         (nucleo-completion-regexp-functions
+          (list (lambda (term)
+                  (cdr (assoc term '(("nihon" . "日本") ("rpt" . "報告")))))))
+         (groups (nucleo-completion--regexp-only-regexp-groups "nihon rpt")))
+    (should (nucleo-completion--regexp-match-p groups "日本-report"))
+    (should (nucleo-completion--regexp-match-p groups "n-i-h-o-n報告"))
+    (should (nucleo-completion--regexp-match-p groups "日本報告"))
+    (should-not (nucleo-completion--regexp-match-p groups "n-i-h-o-n report"))
+    (should-not (nucleo-completion--regexp-match-p groups "日本-notes"))))
 
 (ert-deftest nucleo-completion-regexp-functions-cached-per-completion-test ()
   (let ((nucleo-completion-tests--regexp-calls 0)

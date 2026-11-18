@@ -96,6 +96,17 @@ pub enum LanguageMatcher {
 impl emacs::Transfer for LanguageMatcher {}
 
 impl LanguageMatcher {
+    pub fn has_filename_priority(&self) -> bool {
+        matches!(self, Self::Migemo(matcher) if matcher.has_filename_priority())
+    }
+
+    pub fn match_quality(&self, text: &str, ignore_case: bool) -> Option<u8> {
+        match self {
+            Self::Migemo(matcher) => matcher.match_quality(text, ignore_case),
+            _ => self.find(text, 0, ignore_case).map(|_| 0),
+        }
+    }
+
     pub fn find(&self, text: &str, start: usize, ignore_case: bool) -> Option<(usize, usize)> {
         match self {
             Self::Migemo(matcher) => matcher.find(text, start, ignore_case),

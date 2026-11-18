@@ -1,0 +1,14 @@
+Vendored from rustmigemo 0.1.7-dev.0, commit
+121101dfcfd9465c998ba53fabe43773b14bf868:
+https://github.com/oguna/rustmigemo
+
+The MIT license and upstream third-party notices are retained alongside the
+runtime source. The optional CLI and examples are omitted; the manifest has
+its bin target removed and automatic bin discovery disabled.
+
+Local fixes: LoudsTrie::first_child treats the end of the bit vector as a leaf,
+and BitVector::rank handles prefixes ending at a 64-bit word boundary at the
+end of the vector, including 512-bit rank-block boundaries and the empty
+vector. These fixes prevent panics on valid small dictionaries. Run the
+boundary regressions from the Nucleo checkout with
+`cargo test --test rustmigemo-boundaries`.

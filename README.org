@@ -232,14 +232,16 @@ passes their ranks to Rust.  History lookup happens during fuzzy scoring,
 avoiding a separate Lisp scan and a candidate-sized rank list.  Older modules
 and candidates requiring non-Unicode scrubbing retain the compatibility path.
 
-For case-sensitive built-in language search over at least 4,096 candidates,
+For built-in language search over at least 4,096 candidates,
 the module also tests language regexps during that same candidate scan.  Only
 fuzzy misses need the extra regexp tests.  The native options API also records
 whether those candidates contain non-ASCII text during scanning and constructs
 the merged result in Rust, preserving the existing priority and highlighting
-rules.  Older modules still merge the native scan's results in Lisp.
+rules.  Repeated alternatives are evaluated once per candidate during the
+grouped native scan.  Older modules still merge the native scan's results in Lisp.
 
-Smaller lists, custom regexp functions, case-insensitive searches, unsupported
+Case-insensitive searches use the current Emacs case-equivalence table for
+generated fuzzy terms.  Smaller lists, custom regexp functions, unsupported
 regexp syntax, and candidates that need non-Unicode scrubbing use the existing
 Emacs regexp path.  The cutoff avoids compiling native regexps for small lists
 where setup costs can exceed the savings.  Translation accepts only the shared
@@ -395,15 +397,17 @@ conjoining-jamo sequences.  Complete Hangul syllables and ASCII letters or
 digits can be mixed with initials.  At least one initial is required.
 
 Language matches use the same regexp-only ordering and highlighting described
-below.  Terms still combine with AND, so ~nihon txt~ can find ~日本.txt~.
+below.  Each term can use a language match or a fuzzy match, so ~nihon rpt~
+can find ~日本-report.txt~.
 The existing two-character minimum also applies to language search.  Long or
 unsupported terms fall back to ordinary fuzzy matching.  Japanese expansion
 accepts at most 32 characters, including ASCII letters, hyphens for long vowels,
-and apostrophes after ~n~.  Chinese input accepts at most 32 characters,
-including syllable separators and the colon in ~u:~.  Korean terms accept at
-most 32 characters.  Japanese, Chinese, and Korean use direct native matching,
-so ambiguous Chinese inputs do not require a large regexp.  Older modules
-fall back to the legacy regexp expanders, whose Chinese expansions are bounded.
+apostrophes after ~n~, and attached filename suffixes.  Chinese input accepts
+at most 32 characters, including syllable separators and the colon in ~u:~.
+Korean terms accept at most 32 characters.  Japanese, Chinese, and Korean
+use direct native matching, so ambiguous Chinese inputs do not require a large
+regexp.  Older modules fall back to the legacy regexp expanders, whose Chinese
+expansions are bounded.
 
 Language data is initialized lazily on first use.  Without the Rust module,
 language expansion is unavailable, while fuzzy matching and user-configured
@@ -416,9 +420,9 @@ The bundled Japanese dictionaries include the original
 from the official UniDic contemporary written Japanese 2025.12 release.  Their
 sources, checksums, and license details are recorded in ~data/README.org~,
 ~THIRD-PARTY-NOTICES~, and ~LICENSES/~.  Dictionary bytes are checked into the
-repository, so building never fetches a dictionary.  The module uses a pinned
-revision of ~rustmigemo~ and the ~pinyin~ crate; Korean initial ranges need no
-external dictionary.
+repository, so building never fetches a dictionary.  The module uses a
+vendored ~rustmigemo~ revision with dictionary boundary fixes and the ~pinyin~
+crate.  Korean initial ranges use the Unicode syllable layout.
 
 Japanese lookup accepts uppercase and mixed-case romaji.  ASCII alternatives
 preserve the original input spelling; the normal fuzzy matcher and
@@ -426,6 +430,20 @@ preserve the original input spelling; the normal fuzzy matcher and
 backend does not add unrelated ASCII-only dictionary alternatives.  Hyphens
 represent long vowels, as in ~ko-hi-~ for ~コーヒー~, and an apostrophe separates
 ~n~ from the following vowel, as in ~kan'i~ for ~簡易~.
+An ASCII digit starts an attached literal suffix, so ~kaigi2026~ finds
+~会議2026.org~.  Separators can be included explicitly, as in ~kaigi-2026~
+for ~会議-2026.org~ and ~nihon_report~ for ~日本_report.txt~.  A hyphen
+before digits is also checked as a long vowel, so ~ko-hi-2026~ finds
+~コーヒー2026~.  Leading digits work as well.  For example, ~2026kaigi~
+finds ~2026会議.org~.
+A suffix starting with a dot can follow more characters
+in the same filename component, so ~pa-to.txt~ finds ~パートナー.txt~.
+The search stops at slashes, backslashes, and line breaks.  Dots in compound
+extensions are also literal.  For Japanese filename matches, exact stems with
+a terminal extension rank first, followed by other terminal-extension matches
+and adjacent stem/suffix matches.  Equal ranks retain their source order, and
+~nucleo-completion-regexp-only-match-priority~ still determines placement
+relative to fuzzy matches.
 
 You can add local UTF-8 C/Migemo text dictionaries alongside the bundled data.
 Each line contains a reading followed by one or more spellings, separated by
@@ -561,9 +579,21 @@ After rebuilding the module, restart graphical Emacs and check:
 - In Vertico and Corfu, enter ~kensaku~ against candidates containing ~検索~,
   ~kensaku~ and unrelated text.  Check that the Japanese result is visible and
   the matching characters are highlighted, including lazy highlighting.
-- Check ~keiji~ against ~軽自~ and ~軽自動車~, ~pa-to~ against ~パート~,
+- Check ~keij~ and ~keiz~ against ~軽自動車~ and ~経済~, including with a
+  small local dictionary.  Check ~keiji~ against ~軽自~ and ~軽自動車~,
+  ~pa-to~ against ~パート~,
   ~ko-hi-~ against ~コーヒー~, ~kan'i~ against ~簡易~, ~toiawase~ against
   ~問い合わせ~, and ~moushiko~ against ~申し込み~.
+- Check that ~nihon rpt~ finds ~日本-report.txt~, ~kaigi2026~ finds
+  ~会議2026.org~, and ~nihon.txt~ finds ~日本.txt~.  Check that the Japanese
+  spelling and the matching ASCII characters are highlighted.  Check that
+  ~pa-to.txt~ finds and highlights ~パートナー.txt~ and excludes
+  ~パートナー.pdf~ and matches spanning directory separators.  Check that
+  ~kaigi2026~ excludes ~会議-2026~.  Check ~kaigi-2026~, ~nihon_report~,
+  and ~2026kaigi~ against ~会議-2026.org~, ~日本_report.txt~, and
+  ~2026会議.org~, respectively.  Check that ~nihon.txt~ ranks ~日本.txt~
+  ahead of ~日本語.txt~, and ~pa-to.txt~ ranks ~パートナー.txt~ ahead of
+  ~パートナー.txt.bak~.
 - Configure a local UTF-8 Migemo dictionary and check its candidates and
   highlights alongside bundled matches.  Edit the file and confirm a later
   completion uses the updated entries.
@@ -580,7 +610,8 @@ After rebuilding the module, restart graphical Emacs and check:
   highlighting after changing buffers; a new completion must use its own
   language and case settings.
 - Repeat built-in language searches with at least 4,096 candidates.  Check
-  candidate ordering, selection, and lazy highlighting while scrolling.
+  candidate ordering, selection, and lazy highlighting while scrolling, with
+  case-insensitive completion both enabled and disabled.
 - Toggle ~nucleo-completion-languages~ between enabled and nil in the same
   completion session.  Check that previously filtered results are not reused.
 - With score bands enabled, check that language-only matches use the high-score

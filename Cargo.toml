@@ -9,12 +9,16 @@ description = "Rust dynamic module for nucleo-completion.el"
 [lib]
 crate-type = ["cdylib"]
 
+[[test]]
+name = "rustmigemo-boundaries"
+path = "vendor/rustmigemo/tests/boundaries.rs"
+
 [dependencies]
 emacs = "0.21"
 nucleo-matcher = "0.3"
 regex = "=1.13.1"
 pinyin = { version = "0.11", default-features = false, features = ["plain", "heteronym"] }
-rustmigemo = { git = "https://github.com/oguna/rustmigemo", rev = "121101dfcfd9465c998ba53fabe43773b14bf868", version = "0.1.7-dev.0" }
+rustmigemo = { path = "vendor/rustmigemo", version = "0.1.7-dev.0" }
 
 [profile.release]
 codegen-units = 1
