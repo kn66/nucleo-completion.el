@@ -1917,10 +1917,10 @@ Walk SCORABLE once."
   "Prefer filename matches for NEEDLE while keeping equal CANDIDATES in order."
   (let ((matchers
          (when (and (cdr candidates)
-                    (memq 'japanese nucleo-completion-languages)
+                    nucleo-completion-languages
                     (fboundp 'nucleo-completion-filename-match-priority))
            (cl-loop for term in (nucleo-completion--terms needle)
-                    when (string-search "." term)
+                    when (string-match-p "[.．]" term)
                     append (cl-remove-if-not
                             #'user-ptrp
                             (nucleo-completion--regexp-function-regexps term))))))

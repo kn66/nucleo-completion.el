@@ -1,4 +1,4 @@
-//! Direct matching for modern Hangul initial-consonant queries.
+//! Matching modern Hangul syllables and initial-consonant queries.
 
 use std::str::Chars;
 
@@ -56,10 +56,11 @@ impl HangulMatcher {
             return None;
         }
         let mut parts = Vec::new();
-        let mut has_initial = false;
+        let mut has_hangul = false;
         let mut chars = term.chars();
         while let Some(character) = chars.clone().next() {
             if let Some((syllable, length)) = syllable_at(chars.clone()) {
+                has_hangul = true;
                 parts.push(QueryPart::Syllable(syllable));
                 chars.nth(length - 1);
             } else if let Some(index) =
@@ -70,7 +71,7 @@ impl HangulMatcher {
                         .then(|| (code - 0x1100) as usize)
                 })
             {
-                has_initial = true;
+                has_hangul = true;
                 parts.push(QueryPart::Initial {
                     index: index as u32,
                     literal: character,
@@ -83,7 +84,43 @@ impl HangulMatcher {
                 return None;
             }
         }
-        has_initial.then_some(Self { parts })
+        has_hangul.then_some(Self { parts })
+    }
+
+    /// Produce an Emacs regexp for the same query and canonical spellings.
+    pub(crate) fn regexp(&self) -> String {
+        let mut result = String::new();
+        for part in &self.parts {
+            match *part {
+                QueryPart::Initial { index, literal } => {
+                    let first = char::from_u32(0xac00 + index * SYLLABLES_PER_INITIAL).unwrap();
+                    let last = char::from_u32(first as u32 + SYLLABLES_PER_INITIAL - 1).unwrap();
+                    let leading = char::from_u32(0x1100 + index).unwrap();
+                    result.push_str(&format!(
+                        "\\(?:{leading}[ᅡ-ᅵ][ᆨ-ᇂ]?\\|[{literal}{first}-{last}][ᆨ-ᇂ]?\\)"
+                    ));
+                }
+                QueryPart::Syllable(syllable) => {
+                    let offset = syllable - 0xac00;
+                    let composed = char::from_u32(syllable).unwrap();
+                    let leading = char::from_u32(0x1100 + offset / SYLLABLES_PER_INITIAL).unwrap();
+                    let vowel =
+                        char::from_u32(0x1161 + (offset % SYLLABLES_PER_INITIAL) / 28).unwrap();
+                    let trailing = offset % 28;
+                    if trailing == 0 {
+                        result.push_str(&format!("\\(?:{composed}\\|{leading}{vowel}\\)"));
+                    } else {
+                        let lv = char::from_u32(syllable - trailing).unwrap();
+                        let final_jamo = char::from_u32(0x11a7 + trailing).unwrap();
+                        result.push_str(&format!(
+                            "\\(?:{composed}\\|{lv}{final_jamo}\\|{leading}{vowel}{final_jamo}\\)"
+                        ));
+                    }
+                }
+                QueryPart::Ascii(character) => result.push(character),
+            }
+        }
+        result
     }
 
     /// Find the first match at or after START, using character offsets.
@@ -105,7 +142,7 @@ impl HangulMatcher {
         None
     }
 
-    fn match_prefix(&self, mut chars: Chars<'_>, ignore_case: bool) -> Option<usize> {
+    pub(crate) fn match_prefix(&self, mut chars: Chars<'_>, ignore_case: bool) -> Option<usize> {
         let mut total = 0;
         for part in &self.parts {
             let length = match *part {
@@ -170,8 +207,20 @@ mod tests {
     }
 
     #[test]
+    fn completed_syllables_match_canonical_spellings_with_original_offsets() {
+        for query in ["감사", "감사", "감사"] {
+            let matcher = HangulMatcher::new(query).unwrap();
+            assert_eq!(matcher.find("😀감사", 0, false), Some((1, 3)));
+            assert_eq!(matcher.find("😀감사", 0, false), Some((1, 6)));
+            assert_eq!(matcher.find("😀감사", 0, false), Some((1, 5)));
+            assert_eq!(matcher.find("감사", 1, false), None);
+            assert_eq!(matcher.find("가사", 0, false), None);
+        }
+    }
+
+    #[test]
     fn restrictions_and_ascii_case() {
-        for query in ["", "가나", "가나", "ㄱ*", "ㄱᅡᆨ", "ᅡㄱ"] {
+        for query in ["", "abc", "ㄱ*", "ㄱᅡᆨ", "ᅡㄱ"] {
             assert!(HangulMatcher::new(query).is_none(), "{query}");
         }
         assert!(HangulMatcher::new(&"ㄱ".repeat(33)).is_none());

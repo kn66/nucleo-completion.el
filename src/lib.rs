@@ -1,4 +1,6 @@
+mod filename;
 mod hangul;
+mod language_filename;
 mod languages;
 mod migemo;
 mod migemo_dictionary;
@@ -6,6 +8,7 @@ mod regexp;
 
 use regexp::RegexpGroups;
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::HashMap;
@@ -928,11 +931,31 @@ fn candidates_with_options<'e>(
     }
 }
 
+// Normalize only lookup syntax understood by the language matchers.  Candidate
+// text and generic fuzzy patterns must retain their original characters.
+fn normalize_language_query(query: &str) -> Cow<'_, str> {
+    fn normalize_char(ch: char) -> char {
+        match ch {
+            'Ａ'..='Ｚ' | 'ａ'..='ｚ' | '０'..='９' | '－' | '＿' | '．' | '＇' | '：' => {
+                char::from_u32(ch as u32 - 0xfee0).unwrap()
+            }
+            '’' => '\'',
+            _ => ch,
+        }
+    }
+
+    if query.chars().any(|ch| normalize_char(ch) != ch) {
+        Cow::Owned(query.chars().map(normalize_char).collect())
+    } else {
+        Cow::Borrowed(query)
+    }
+}
+
 /// Return an Emacs regexp for TERM using the bundled Japanese dictionary.
 /// Return nil for unsupported terms or expansions exceeding the size limit.
 #[defun]
 fn migemo_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
-    migemo::migemo_regexp(&term).into_lisp(env)
+    migemo::migemo_regexp(&normalize_language_query(&term)).into_lisp(env)
 }
 
 /// Import a local UTF-8 Migemo text dictionary from PATH.
@@ -954,39 +977,54 @@ fn migemo_matcher<'e>(
         extra.push(dictionaries.car::<&migemo::MigemoDictionary>()?);
         dictionaries = dictionaries.cdr()?;
     }
-    migemo::MigemoMatcher::new(&term, &extra)
+    migemo::MigemoMatcher::new(&normalize_language_query(&term), &extra)
         .map(languages::LanguageMatcher::Migemo)
         .map(Box::new)
         .into_lisp(env)
 }
 
-/// Return an Emacs regexp for toneless pinyin TERM.
-/// Accept ü, v, or u: and apostrophe syllable boundaries.  Include
-/// alternative readings and a partial final syllable; return nil
-/// for unsupported terms or expansions exceeding the size limit.
+/// Return an Emacs regexp for pinyin TERM, including filename affixes.
+/// Accept tone marks, tone numbers, ü, v, or u: and apostrophe syllable
+/// boundaries.  Include alternative readings and a partial final syllable.
 #[defun]
 fn pinyin_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
-    languages::pinyin_regexp(&term).into_lisp(env)
+    language_filename::regexp(
+        &normalize_language_query(&term),
+        language_filename::FilenameLanguage::Pinyin,
+    )
+    .into_lisp(env)
 }
 
-/// Return an Emacs regexp for Hangul initial-consonant TERM.
-/// Allow mixed syllables and ASCII alphanumeric literals; return nil when
-/// there is no initial consonant or TERM contains unsupported characters.
+/// Return an Emacs regexp for Hangul TERM.
+/// Allow complete syllables, initials, ASCII literals and filename affixes.
 #[defun]
 fn hangul_regexp<'e>(env: &'e Env, term: String) -> Result<Value<'e>> {
-    languages::hangul_regexp(&term).into_lisp(env)
+    language_filename::regexp(
+        &normalize_language_query(&term),
+        language_filename::FilenameLanguage::Hangul,
+    )
+    .into_lisp(env)
 }
 
 /// Compile TERM for direct matching in LANGUAGE.
 /// Return an opaque matcher, or nil for an unsupported term or language.
 #[defun]
 fn language_matcher<'e>(env: &'e Env, language: Value<'e>, term: String) -> Result<Value<'e>> {
+    use language_filename::{FilenameLanguage, LanguageFilenameMatcher};
     use languages::{LanguageMatcher, PinyinMatcher};
 
+    let term = normalize_language_query(&term);
     let matcher = if language == env.intern("chinese")? {
-        PinyinMatcher::new(&term).map(LanguageMatcher::Pinyin)
+        LanguageFilenameMatcher::new(&term, FilenameLanguage::Pinyin)
+            .map(LanguageMatcher::Filename)
+            .or_else(|| PinyinMatcher::new(&term).map(LanguageMatcher::Pinyin))
     } else if language == env.intern("korean")? {
-        hangul::HangulMatcher::new(&term).map(LanguageMatcher::Hangul)
+        hangul::HangulMatcher::new(&term)
+            .map(LanguageMatcher::Hangul)
+            .or_else(|| {
+                LanguageFilenameMatcher::new(&term, FilenameLanguage::Hangul)
+                    .map(LanguageMatcher::Filename)
+            })
     } else {
         None
     };
@@ -1134,6 +1172,18 @@ fn candidates_with_regexp_groups<'e>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_query_normalization_is_narrow_and_borrows_unchanged_input() {
+        assert!(matches!(
+            normalize_language_query("lüe4 한글 日本語！"),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(
+            normalize_language_query("Ａｚ０９－＿．＇：’！"),
+            "Az09-_.':'！"
+        );
+    }
 
     fn sort_data(
         index: usize,

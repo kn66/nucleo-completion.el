@@ -384,17 +384,30 @@ Select additional languages, or disable language expansion entirely:
   (setq nucleo-completion-languages nil)
 #+end_src
 
-Chinese search accepts joined, toneless pinyin, such as ~zhongguo~ for ~中国~.
+Chinese search accepts pinyin such as ~zhongguo~, ~zhōngguó~, or
+~zhong1guo2~ for ~中国~.  Tone marks and numbers constrain the reading.
+Unmarked syllables accept any tone.
 It considers alternative syllable divisions and character readings, and allows
 the final syllable to be incomplete.  Spellings using ~ü~, ~v~, or ~u:~ are
 equivalent: ~lü~, ~lv~, and ~lu:~ can all find ~绿~.  An apostrophe explicitly
 separates syllables: ~xi'an~ finds ~西安~ without also matching ~先~, while
-~xian~ considers both divisions.  It is character-based rather than a phrase
-pronunciation model; tone numbers and pinyin initials are not supported.
+~xian~ considers both divisions.  Tone matching uses each character's possible
+readings.  Pinyin initials are unsupported.  Digits can also be literal
+filename text.  For example, ~zhongguo2026~ finds ~中国2026~, and ambiguous
+~zhongguo2~ can find both ~中国~ and ~中国2~.
 Korean search accepts initial consonants, such as ~ㄱㅅ~ for ~감사~, including
-modern conjoining initials.  It matches both composed syllables and modern
-conjoining-jamo sequences.  Complete Hangul syllables and ASCII letters or
-digits can be mixed with initials.  At least one initial is required.
+modern conjoining initials.  Complete syllables also match across composed
+and decomposed spellings.  For example, ~감사~ can find ~감사.txt~ and
+~감사~ can find ~감사.txt~.  ASCII letters and digits can be mixed with
+Hangul syllables and initials.  Highlighting uses the characters in the
+original candidate.  The legacy Hangul regexp can match a syllable prefix
+when a decomposed spelling has a trailing jamo.  Direct completion checks
+the complete syllable.
+
+The language matchers accept fullwidth ASCII letters, digits, and supported
+separators in the query.  For example, ~ｋｅｉｊｉ~ finds ~軽自~ and
+~nihon－report．txt~ finds ~日本-report.txt~.  The right single quotation mark
+works as an apostrophe in readings such as ~kan’i~ and ~xi’an~.
 
 Language matches use the same regexp-only ordering and highlighting described
 below.  Each term can use a language match or a fuzzy match, so ~nihon rpt~
@@ -432,14 +445,17 @@ represent long vowels, as in ~ko-hi-~ for ~コーヒー~, and an apostrophe sepa
 ~n~ from the following vowel, as in ~kan'i~ for ~簡易~.
 An ASCII digit starts an attached literal suffix, so ~kaigi2026~ finds
 ~会議2026.org~.  Separators can be included explicitly, as in ~kaigi-2026~
-for ~会議-2026.org~ and ~nihon_report~ for ~日本_report.txt~.  A hyphen
-before digits is also checked as a long vowel, so ~ko-hi-2026~ finds
+for ~会議-2026.org~, ~nihon_report~ for ~日本_report.txt~, and
+~nihon-report~ for ~日本-report.txt~.  A hyphen can still be read as a
+long vowel, so ~ko-hi-2026~ finds
 ~コーヒー2026~.  Leading digits work as well.  For example, ~2026kaigi~
 finds ~2026会議.org~.
 A suffix starting with a dot can follow more characters
 in the same filename component, so ~pa-to.txt~ finds ~パートナー.txt~.
 The search stops at slashes, backslashes, and line breaks.  Dots in compound
-extensions are also literal.  For Japanese filename matches, exact stems with
+extensions are also literal.  Chinese and Korean filename terms support the
+same literal affixes.  For example, ~zhongguo.txt~ finds ~中国.txt~ and
+~ㄱㅅ-2026~ finds ~감사-2026.txt~.  For language filename matches, exact stems with
 a terminal extension rank first, followed by other terminal-extension matches
 and adjacent stem/suffix matches.  Equal ranks retain their source order, and
 ~nucleo-completion-regexp-only-match-priority~ still determines placement
@@ -590,8 +606,8 @@ After rebuilding the module, restart graphical Emacs and check:
   ~pa-to.txt~ finds and highlights ~パートナー.txt~ and excludes
   ~パートナー.pdf~ and matches spanning directory separators.  Check that
   ~kaigi2026~ excludes ~会議-2026~.  Check ~kaigi-2026~, ~nihon_report~,
-  and ~2026kaigi~ against ~会議-2026.org~, ~日本_report.txt~, and
-  ~2026会議.org~, respectively.  Check that ~nihon.txt~ ranks ~日本.txt~
+  ~nihon-report~, and ~2026kaigi~ against ~会議-2026.org~, ~日本_report.txt~,
+  ~日本-report.txt~, and ~2026会議.org~, respectively.  Check that ~nihon.txt~ ranks ~日本.txt~
   ahead of ~日本語.txt~, and ~pa-to.txt~ ranks ~パートナー.txt~ ahead of
   ~パートナー.txt.bak~.
 - Configure a local UTF-8 Migemo dictionary and check its candidates and
@@ -599,13 +615,23 @@ After rebuilding the module, restart graphical Emacs and check:
   completion uses the updated entries.
 - Enable all three languages and check ~zhongguo~ against ~中国~ and ~ㄱㅅ~
   against ~감사~.  Check mixed terms such as ~nihon txt~ against ~日本.txt~.
+  Check ~zhongguo.txt~ and ~ㄱㅅ.txt~ against filenames with exact and longer
+  stems, and confirm terminal extensions rank ahead of ~.txt.bak~.  Check
+  ~zhongguo-2026~ and ~ㄱㅅ_report~ against their literal filename affixes.
 - With ~completion-ignore-case~ nil, check that ~FOO~ does not find ~foo~;
   ~NIHON~ should still find ~日本~.  Repeat with case-insensitive completion.
 - With Chinese enabled, check ~lü~, ~lv~, and ~lu:~ against ~绿~, and
   ~xi'an~ against ~西安~ and ~先~.  Only ~西安~ should match the separated input.
+  Check ~zhōngguó~ and ~zhong1guo2~ against ~中国~, and verify an incorrect
+  tone does not match.  Check ~zhongguo2026~ against ~中国2026~ and
+  ~zhongguo2~ against both ~中国~ and ~中国2~.
 - Check ~yinhang~ against both ~银行~ and ~銀行~.  Check ~ㄱㅅ~ against ~감사~
   and its decomposed spelling ~감사~.  The full matched text should be
-  highlighted in each case.
+  highlighted in each case.  Repeat with a complete ~감사~ query against a
+  decomposed filename and a decomposed ~감사~ query against a composed
+  filename.
+- Check ~ｋｅｉｊｉ~, ~nihon－report．txt~, and ~xi’an~ against ~軽自~,
+  ~日本-report.txt~, and ~西安~.  Check that ~先~ is excluded for ~xi’an~.
 - With lazy highlighting, scroll through language results and check consistent
   highlighting after changing buffers; a new completion must use its own
   language and case settings.

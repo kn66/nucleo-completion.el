@@ -10,6 +10,7 @@ use rustmigemo::migemo::{
     ternary_regex_generator::TernaryRegexGenerator,
 };
 
+use crate::filename::{self, FilenameExtension};
 use crate::languages::{MAX_REGEXP_BYTES, MAX_TERM_CHARACTERS};
 
 static BUNDLED: OnceLock<CompactDictionary> = OnceLock::new();
@@ -47,29 +48,16 @@ impl<'a> MigemoTerm<'a> {
         }
         // A leading number (and optional separator) belongs to the filename,
         // not the romanized reading. Keep it adjacent to each expansion.
-        let digits = term.bytes().take_while(u8::is_ascii_digit).count();
-        let leading_end = if digits > 0 && matches!(term.as_bytes().get(digits), Some(b'-' | b'_'))
-        {
-            digits + 1
-        } else {
-            digits
-        };
-        let (leading, rest) = term.split_at(leading_end);
+        let (leading, rest) = filename::split_leading_number(term);
         let suffix_start = rest
             .find(|c: char| c.is_ascii_digit() || c == '.' || c == '_')
             .unwrap_or(rest.len());
         let (reading, suffix) = rest.split_at(suffix_start);
-        if !valid_reading(reading)
-            || !suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        {
+        if !valid_reading(reading) {
             return None;
         }
-        // A leading dot permits a longer filename stem. Other attached
-        // characters, including digits and separators, stay adjacent.
-        let extension_start = suffix.find('.').unwrap_or(suffix.len());
-        let (attached, extension) = suffix.split_at(extension_start);
+        // Attached characters stay adjacent; a bare extension may follow a longer stem.
+        let (attached, extension) = filename::split_suffix(suffix)?;
         Some(Self {
             literal: &term[..term.len() - extension.len()],
             leading,
@@ -79,39 +67,31 @@ impl<'a> MigemoTerm<'a> {
         })
     }
 
-    fn readings(&self) -> impl Iterator<Item = (&'a str, &'a str)> {
-        // A hyphen before digits can be a long vowel or a filename separator.
-        let separated = if self
-            .attached
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_digit)
-        {
-            self.reading
-                .strip_suffix('-')
-                .map(|reading| (reading, &self.literal[self.leading.len() + reading.len()..]))
-        } else {
-            None
-        };
+    fn readings(&self) -> impl Iterator<Item = (&'a str, &'a str)> + '_ {
+        // Keep the whole romaji reading for long vowels. Also try each
+        // plausible hyphen as the start of a literal filename suffix.
+        let separated = self.reading.match_indices('-').filter_map(|(index, _)| {
+            let attached = &self.literal[self.leading.len() + index..];
+            attached
+                .trim_start_matches('-')
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+                .then_some((&self.reading[..index], attached))
+        });
         std::iter::once((self.reading, self.attached)).chain(separated)
     }
 }
 
-struct MigemoWords<'a> {
-    leading: &'a str,
+struct MigemoWords<'a, F> {
     reading: &'a str,
-    attached: &'a str,
-    words: BTreeSet<String>,
+    collect: F,
 }
 
-impl RegexGeneratorTrait for MigemoWords<'_> {
+impl<F: FnMut(&[char])> RegexGeneratorTrait for MigemoWords<'_, F> {
     fn add(&mut self, word: &[char]) {
         if !word.iter().all(char::is_ascii) || word.iter().copied().eq(self.reading.chars()) {
-            // When a number is attached, preserve both 会議2026 and 会議室2026.
-            let mut spelling = self.leading.to_owned();
-            spelling.extend(word);
-            spelling.push_str(self.attached);
-            self.words.insert(spelling);
+            (self.collect)(word);
         }
     }
 
@@ -120,7 +100,7 @@ impl RegexGeneratorTrait for MigemoWords<'_> {
     }
 }
 
-fn expand(term: &MigemoTerm<'_>, extra: &[&MigemoDictionary]) -> Vec<String> {
+fn expand_reading(reading: &str, extra: &[&MigemoDictionary], collect: impl FnMut(&[char])) {
     let bundled = BUNDLED.get_or_init(|| {
         CompactDictionary::new(&include_bytes!("../data/migemo-compact-dict").to_vec())
     });
@@ -132,36 +112,41 @@ fn expand(term: &MigemoTerm<'_>, extra: &[&MigemoDictionary]) -> Vec<String> {
         let entries = HashMap::from([("けいじ".to_owned(), vec!["軽自".to_owned()])]);
         CompactDictionary::new(&compact_dictionary_builder::build(entries))
     });
-    let mut collector = MigemoWords {
-        leading: term.leading,
-        reading: term.reading,
-        attached: term.attached,
-        words: BTreeSet::new(),
-    };
+    let mut collector = MigemoWords { reading, collect };
     let dictionaries = [bundled, unidic, abbreviations]
         .into_iter()
         .chain(extra.iter().map(|dictionary| &dictionary.0));
-    for (reading, attached) in term.readings() {
-        collector.reading = reading;
-        collector.attached = attached;
-        for dictionary in dictionaries.clone() {
-            query_a_word_with_generator(
-                reading,
-                dictionary,
-                &RegexOperator::EmacsNonNewline,
-                &mut collector,
-            );
-        }
+    for dictionary in dictionaries {
+        query_a_word_with_generator(
+            reading,
+            dictionary,
+            &RegexOperator::EmacsNonNewline,
+            &mut collector,
+        );
     }
-    // Shorter complete alternatives already match longer ones at the same
-    // position; retaining them keeps kana prefixes such as パート visible.
-    let mut prefixes: Vec<String> = Vec::new();
-    for word in collector.words {
-        if prefixes
-            .last()
-            .is_none_or(|prefix| !word.starts_with(prefix))
+}
+
+fn expand(term: &MigemoTerm<'_>, extra: &[&MigemoDictionary]) -> Vec<(String, bool)> {
+    let mut spellings = BTreeSet::new();
+    for (reading, attached) in term.readings() {
+        expand_reading(reading, extra, |word| {
+            let mut spelling = term.leading.to_owned();
+            spelling.extend(word);
+            spelling.push_str(attached);
+            spellings.insert((spelling, attached.is_empty()));
+        });
+    }
+    // Keep short alternatives such as パート. With an attached literal and
+    // a dotted suffix, each full spelling may have its own adjacent match.
+    let mut prefixes: Vec<(String, bool)> = Vec::new();
+    let mut last = [None, None];
+    for (word, gap) in spellings {
+        let prefix = &mut last[usize::from(gap)];
+        if (!gap && !term.extension.is_empty())
+            || prefix.is_none_or(|index: usize| !word.starts_with(&prefixes[index].0))
         {
-            prefixes.push(word);
+            *prefix = Some(prefixes.len());
+            prefixes.push((word, gap));
         }
     }
     prefixes
@@ -169,47 +154,58 @@ fn expand(term: &MigemoTerm<'_>, extra: &[&MigemoDictionary]) -> Vec<String> {
 
 pub fn migemo_regexp(term: &str) -> Option<String> {
     let term = MigemoTerm::parse(term)?;
-    let mut generator = TernaryRegexGenerator::new();
-    let mut literal_alternatives = Vec::new();
-    for word in expand(&term, &[]) {
-        if word.contains([
-            '(', ')', '{', '}', '|', '^', '$', '.', '*', '+', '?', '[', ']', '\\', '-',
-        ]) {
-            // Emacs escapes a different set of characters from the upstream
-            // generator. Keep punctuation out of its character classes.
-            let mut quoted = String::new();
-            for character in word.chars() {
-                if "$^.*+?[\\]".contains(character) {
-                    quoted.push('\\');
+    let mut groups = Vec::new();
+    for (reading, attached) in term.readings() {
+        let mut generator = TernaryRegexGenerator::new();
+        let mut alternatives = Vec::new();
+        let mut prefix = String::new();
+        let mut words = BTreeSet::<String>::new();
+        expand_reading(reading, &[], |word| {
+            words.insert(word.iter().collect());
+        });
+        for word in words {
+            if attached.is_empty() && !prefix.is_empty() && word.starts_with(&prefix) {
+                continue;
+            }
+            prefix.clone_from(&word);
+            if word.contains([
+                '(', ')', '{', '}', '|', '^', '$', '.', '*', '+', '?', '[', ']', '\\', '-',
+            ]) {
+                // Emacs escapes a different set of characters from the
+                // upstream generator, which also puts hyphens in classes.
+                let mut quoted = String::new();
+                for character in word.chars() {
+                    if "$^.*+?[\\]".contains(character) {
+                        quoted.push('\\');
+                    }
+                    quoted.push(character);
                 }
-                quoted.push(character);
+                alternatives.push(quoted);
+            } else {
+                generator.add(&word.chars().collect::<Vec<_>>());
             }
-            literal_alternatives.push(quoted);
-        } else {
-            generator.add(&word.chars().collect::<Vec<_>>());
         }
+        let generated = generator.generate(&RegexOperator::EmacsNonNewline);
+        if !generated.is_empty() {
+            alternatives.push(generated);
+        }
+        if alternatives.is_empty() {
+            continue;
+        }
+        let expression = match alternatives.as_slice() {
+            [only] => only.clone(),
+            _ => format!("\\(?:{}\\)", alternatives.join("\\|")),
+        };
+        // Append the shared suffix once instead of repeating it in the
+        // expansion of every spelling.
+        let mut group = format!("{}{expression}{attached}", term.leading);
+        filename::append_extension_regexp(&mut group, term.extension, attached.is_empty());
+        groups.push(group);
     }
-    let generated = generator.generate(&RegexOperator::EmacsNonNewline);
-    if !generated.is_empty() {
-        literal_alternatives.push(generated);
-    }
-    let mut result = match literal_alternatives.as_slice() {
+    let result = match groups.as_slice() {
         [only] => only.clone(),
-        _ => format!("\\(?:{}\\)", literal_alternatives.join("\\|")),
+        _ => format!("\\(?:{}\\)", groups.join("\\|")),
     };
-    if !term.extension.is_empty() {
-        // Match only within this filename component, and stop at the first
-        // suffix so legacy regexp highlighting agrees with the native path.
-        if term.attached.is_empty() {
-            result.push_str("[^/\\\\\n\r]*?");
-        }
-        for character in term.extension.chars() {
-            if character == '.' {
-                result.push('\\');
-            }
-            result.push(character);
-        }
-    }
     (result.len() <= MAX_REGEXP_BYTES).then_some(result)
 }
 
@@ -217,19 +213,19 @@ pub struct MigemoMatcher {
     literal: String,
     extension: String,
     allow_extension_gap: bool,
-    words: HashMap<char, Vec<String>>,
+    words: HashMap<char, Vec<(String, bool)>>,
 }
 
 impl MigemoMatcher {
     pub fn new(term: &str, extra: &[&MigemoDictionary]) -> Option<Self> {
         let parsed = MigemoTerm::parse(term)?;
         let mut by_initial = HashMap::<_, Vec<_>>::new();
-        for word in expand(&parsed, extra) {
+        for (word, gap) in expand(&parsed, extra) {
             if let Some(initial) = word.chars().next().filter(|_| word != parsed.literal) {
                 by_initial
                     .entry(initial.to_lowercase().next().unwrap())
                     .or_default()
-                    .push(word);
+                    .push((word, gap));
             }
         }
         Some(Self {
@@ -255,21 +251,27 @@ impl MigemoMatcher {
         for (offset, first) in text.char_indices() {
             let initial = first.to_lowercase().next().unwrap();
             let tail = &text[offset..];
-            let at_component_start =
-                offset == 0 || text[..offset].ends_with(['/', '\\', '\n', '\r']);
+            let at_component_start = offset == 0
+                || text[..offset]
+                    .chars()
+                    .next_back()
+                    .is_some_and(filename::is_component_boundary);
             let candidates = self
                 .words
                 .get(&initial)
                 .into_iter()
                 .flatten()
-                .map(String::as_str)
-                .chain((initial == literal_initial).then_some(self.literal.as_str()));
-            for stem in candidates {
+                .map(|(word, gap)| (word.as_str(), *gap))
+                .chain(
+                    (initial == literal_initial)
+                        .then_some((self.literal.as_str(), self.allow_extension_gap)),
+                );
+            for (stem, gap) in candidates {
                 if let Some(quality) =
-                    self.filename_quality(tail, stem, ignore_case, at_component_start)
+                    self.filename_quality(tail, stem, ignore_case, at_component_start, gap)
                 {
                     best = Some(best.map_or(quality, |value: u8| value.max(quality)));
-                    if best == Some(3) {
+                    if best == Some(filename::MAX_PRIORITY) {
                         return best;
                     }
                 }
@@ -284,14 +286,19 @@ impl MigemoMatcher {
             let suffix = &text[offset..];
             let initial = first.to_lowercase().next().unwrap();
             if initial == literal_initial {
-                if let Some(length) = self.match_filename(suffix, &self.literal, ignore_case) {
+                if let Some(length) = self.match_filename(
+                    suffix,
+                    &self.literal,
+                    ignore_case,
+                    self.allow_extension_gap,
+                ) {
                     return Some((begin, begin + length));
                 }
             }
             if let Some(length) = self.words.get(&initial).and_then(|words| {
                 words
                     .iter()
-                    .find_map(|word| self.match_filename(suffix, word, ignore_case))
+                    .find_map(|(word, gap)| self.match_filename(suffix, word, ignore_case, *gap))
             }) {
                 return Some((begin, begin + length));
             }
@@ -300,29 +307,27 @@ impl MigemoMatcher {
     }
     // A dotted suffix alone can follow extra characters in the same filename.
     // Return character offsets to match the module's highlighting API.
-    fn match_filename(&self, text: &str, stem: &str, ignore_case: bool) -> Option<usize> {
-        if !matches_prefix(text, stem, ignore_case) {
+    fn match_filename(
+        &self,
+        text: &str,
+        stem: &str,
+        ignore_case: bool,
+        gap: bool,
+    ) -> Option<usize> {
+        if !filename::literal_prefix(text, stem, ignore_case) {
             return None;
         }
         let stem_len = stem.chars().count();
-        let extension = &self.extension;
-        if extension.is_empty() {
+        if self.extension.is_empty() {
             return Some(stem_len);
         }
         let offset = text
             .char_indices()
             .nth(stem_len)
             .map_or(text.len(), |(offset, _)| offset);
-        let tail = &text[offset..];
-        for (count, (byte_offset, character)) in tail.char_indices().enumerate() {
-            if matches_prefix(&tail[byte_offset..], extension, ignore_case) {
-                return Some(stem_len + count + extension.len());
-            }
-            if !self.allow_extension_gap || matches!(character, '/' | '\\' | '\n' | '\r') {
-                break;
-            }
-        }
-        None
+        FilenameExtension::new(&self.extension, gap)
+            .match_end(&text[offset..], ignore_case)
+            .map(|length| stem_len + length)
     }
 
     // Consider later suffixes in case the first occurrence is part of .txt.bak.
@@ -332,8 +337,9 @@ impl MigemoMatcher {
         stem: &str,
         ignore_case: bool,
         at_component_start: bool,
+        gap: bool,
     ) -> Option<u8> {
-        if !matches_prefix(text, stem, ignore_case) {
+        if !filename::literal_prefix(text, stem, ignore_case) {
             return None;
         }
         let stem_len = stem.chars().count();
@@ -341,44 +347,12 @@ impl MigemoMatcher {
             .char_indices()
             .nth(stem_len)
             .map_or(text.len(), |(offset, _)| offset);
-        let tail = &text[offset..];
-        let extension = &self.extension;
-        let mut best = None;
-        for (position, (byte_offset, character)) in tail.char_indices().enumerate() {
-            let suffix = &tail[byte_offset..];
-            if matches_prefix(suffix, extension, ignore_case) {
-                let terminal = matches!(
-                    suffix.chars().nth(extension.len()),
-                    None | Some('/' | '\\' | '\n' | '\r')
-                );
-                let quality = match (position == 0, terminal) {
-                    (true, true) if at_component_start => 3,
-                    (_, true) => 2,
-                    (true, false) => 1,
-                    (false, false) => 0,
-                };
-                best = Some(best.map_or(quality, |value: u8| value.max(quality)));
-            }
-            if !self.allow_extension_gap || matches!(character, '/' | '\\' | '\n' | '\r') {
-                break;
-            }
-        }
-        best
+        FilenameExtension::new(&self.extension, gap).match_quality(
+            &text[offset..],
+            ignore_case,
+            at_component_start,
+        )
     }
-}
-
-fn matches_prefix(text: &str, prefix: &str, ignore_case: bool) -> bool {
-    if text.starts_with(prefix) {
-        return true;
-    }
-    if !ignore_case {
-        return false;
-    }
-    let mut text = text.chars();
-    prefix.chars().all(|expected| {
-        text.next()
-            .is_some_and(|actual| actual.to_lowercase().eq(expected.to_lowercase()))
-    })
 }
 
 #[cfg(test)]
@@ -409,6 +383,34 @@ mod tests {
             .unwrap()
             .find("会議2026", 0, false)
             .is_none());
+    }
+
+    #[test]
+    fn alphabetic_hyphen_suffixes_stay_literal() {
+        for (query, text) in [
+            ("nihon-report", "日本-report.txt"),
+            ("nihon-report.txt", "日本-report.txt"),
+            ("nihon-report-final.txt", "日本-report-final.txt"),
+            ("ko-hi--2026", "コーヒー-2026"),
+            ("ko-hi-2026", "コーヒー2026"),
+            ("pa-to", "パートナー"),
+        ] {
+            assert!(
+                MigemoMatcher::new(query, &[])
+                    .unwrap()
+                    .find(text, 0, false)
+                    .is_some(),
+                "{query} {text}"
+            );
+        }
+        assert!(migemo_regexp("nihon-report").is_some());
+        let matcher = MigemoMatcher::new("nihon-report.txt", &[]).unwrap();
+        assert_eq!(matcher.match_quality("日本-report.txt", false), Some(3));
+        assert_eq!(matcher.find("日本-report-old.txt", 0, false), None);
+        assert_eq!(matcher.find("nihon-report.txt", 0, false), Some((0, 16)));
+        assert!(migemo_regexp("nihon-report.txt")
+            .unwrap()
+            .contains("-report\\.txt"));
     }
 
     #[test]
